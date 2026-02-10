@@ -32,20 +32,6 @@ type Profile = {
   active: boolean | null;
 };
 
-const STATUS_OPTIONS = [
-  "REQUESTED",
-  "APPROVED",
-  "REJECTED",
-] as const;
-
-type Status = (typeof STATUS_OPTIONS)[number];
-
-const STATUS_LABELS: Record<Status, string> = {
-  REQUESTED: "Angefragt",
-  APPROVED: "Genehmigt",
-  REJECTED: "Abgelehnt",
-};
-
 function roundToStep(date: Date, stepMinutes: number) {
   const d = new Date(date);
   d.setSeconds(0, 0);
@@ -81,6 +67,212 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+/**
+ * Kompaktes MultiSelect-Menü (nur Deutsch, keine doppelten Labels).
+ * - defaultSelected: was bei "Default" gesetzt wird
+ * - selected = [] kann (je nach use-case) "Alle" bedeuten
+ */
+function MultiSelectMenu({
+  label,
+  options,
+  selected,
+  onChange,
+  placeholder,
+  defaultSelected,
+  emptyMeansAll = true,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+  placeholder?: string;
+  defaultSelected?: string[];
+  emptyMeansAll?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  // Close on outside click / ESC
+  useEffect(() => {
+    if (!open) return;
+
+    function onDown(e: MouseEvent) {
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      const container = t.closest?.("[data-ms-container]");
+      if (!container) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  function toggle(v: string) {
+    const next = new Set(selectedSet);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    onChange(Array.from(next));
+  }
+
+  function setDefault() {
+    onChange(defaultSelected ?? []);
+  }
+
+  function setAll() {
+    onChange(options.map((o) => o.value));
+  }
+
+  // Button summary
+  const summary =
+    selected.length === 0 && emptyMeansAll
+      ? `${label}: Alle`
+      : selected.length === 0
+      ? (placeholder ?? `${label}: —`)
+      : `${label} (${selected.length}): ${options
+          .filter((o) => selectedSet.has(o.value))
+          .map((o) => o.label)
+          .join(", ")}`;
+
+  return (
+    <div data-ms-container style={{ position: "relative", minWidth: 260 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          padding: "8px 10px",
+          borderRadius: 10,
+          border: "1px solid #273243",
+          background: "rgba(255,255,255,0.03)",
+          color: "inherit",
+          cursor: "pointer",
+          fontSize: 13,
+          lineHeight: 1.2,
+        }}
+      >
+        {summary}
+        <span style={{ float: "right", opacity: 0.8 }}>{open ? "▲" : "▼"}</span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 8px)",
+            left: 0,
+            zIndex: 50,
+            width: 340, // kompakter
+            maxWidth: "90vw",
+            background: "rgba(15, 22, 32, 0.98)",
+            border: "1px solid rgba(255,255,255,0.16)",
+            borderRadius: 12,
+            padding: 8, // kompakter
+            boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+          }}
+        >
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button
+              type="button"
+              onClick={setDefault}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              Default
+            </button>
+            <button
+              type="button"
+              onClick={setAll}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              Alle
+            </button>
+            <div style={{ flex: 1 }} />
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              Schließen
+            </button>
+          </div>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            {options.map((o) => {
+              const checked = selectedSet.has(o.value);
+              return (
+                <label
+                  key={o.value}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 10px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    background: checked ? "rgba(255,255,255,0.06)" : "transparent",
+                    cursor: "pointer",
+                    userSelect: "none",
+                    fontSize: 14,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(o.value)}
+                    style={{ width: 16, height: 16 }}
+                  />
+                  {/* nur Deutsch */}
+                  <span style={{ fontWeight: 700 }}>{o.label}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function statusLabelDE(status: string) {
+  const s = String(status || "").toUpperCase();
+  if (s === "REQUESTED") return "Angefragt";
+  if (s === "APPROVED") return "Genehmigt";
+  if (s === "REJECTED") return "Abgelehnt";
+  return s;
+}
+
 export default function CalendarPage() {
   const [sessionChecked, setSessionChecked] = useState(false);
 
@@ -93,10 +285,9 @@ export default function CalendarPage() {
 
   const [error, setError] = useState<string | null>(null);
 
-  const [pitchFilter, setPitchFilter] = useState<string>("ALL");
-
-  // ✅ Multi-Status (Default: nur REQUESTED+APPROVED)
-  const [statusFilter, setStatusFilter] = useState<Status[]>(["REQUESTED", "APPROVED"]);
+  // ✅ Multi-Select Filter
+  const [pitchFilter, setPitchFilter] = useState<string[]>([]); // leer = alle Plätze
+  const [statusFilter, setStatusFilter] = useState<string[]>(["REQUESTED", "APPROVED"]); // REJECTED optional
 
   // -------------------------
   // Tooltip (Blase)
@@ -135,6 +326,7 @@ export default function CalendarPage() {
     setTip({ show: true, x, y, text });
   }
 
+  // Tooltip folgt Maus + AUTO-HIDE wenn nicht mehr über Event
   useEffect(() => {
     function onMove(e: MouseEvent) {
       lastMouse.current = { x: e.clientX, y: e.clientY };
@@ -164,52 +356,6 @@ export default function CalendarPage() {
       window.removeEventListener("resize", onScrollOrResize);
     };
   }, [tip.show, tip.text]);
-
-  // -------------------------
-  // Status Dropdown (Multi)
-  // -------------------------
-  const statusMenuRef = useRef<HTMLDivElement | null>(null);
-  const [statusOpen, setStatusOpen] = useState(false);
-
-  useEffect(() => {
-    function onDocDown(e: MouseEvent) {
-      if (!statusOpen) return;
-      const t = e.target as Node | null;
-      if (t && statusMenuRef.current && !statusMenuRef.current.contains(t)) setStatusOpen(false);
-    }
-    function onEsc(e: KeyboardEvent) {
-      if (e.key === "Escape") setStatusOpen(false);
-    }
-    document.addEventListener("mousedown", onDocDown);
-    document.addEventListener("keydown", onEsc);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      document.removeEventListener("keydown", onEsc);
-    };
-  }, [statusOpen]);
-
-  function toggleStatus(s: Status) {
-    setStatusFilter((prev) => {
-      const has = prev.includes(s);
-      const next = has ? prev.filter((x) => x !== s) : [...prev, s];
-      // Nie leer lassen -> wenn leer, wieder Default setzen
-      if (next.length === 0) return ["REQUESTED", "APPROVED"];
-      return next;
-    });
-  }
-
-  function selectDefaults() {
-    setStatusFilter(["REQUESTED", "APPROVED"]);
-  }
-  function selectAll() {
-    setStatusFilter([...STATUS_OPTIONS]);
-  }
-
-  const statusButtonText = useMemo(() => {
-    const labels = statusFilter.map((s) => STATUS_LABELS[s]);
-    if (labels.length <= 2) return `Status (${labels.length}): ${labels.join(", ")}`;
-    return `Status (${labels.length})`;
-  }, [statusFilter]);
 
   // -------------------------
   // Session + Profil laden
@@ -307,21 +453,31 @@ export default function CalendarPage() {
   const pitchById = useMemo(() => new Map(pitches.map((x) => [x.id, x])), [pitches]);
   const teamById = useMemo(() => new Map(teams.map((x) => [x.id, x])), [teams]);
 
-  const selectedStatusSet = useMemo(() => new Set(statusFilter), [statusFilter]);
-
   const events = useMemo(() => {
+    const statusSelected = statusFilter.map((s) => String(s || "").toUpperCase());
+    const pitchSelected = pitchFilter;
+
     return bookings
-      .filter((b) => (pitchFilter === "ALL" ? true : b.pitch_id === pitchFilter))
-      // ✅ zeigt nur die ausgewählten Stati (inkl. REJECTED, falls gewählt)
-      .filter((b) => selectedStatusSet.has(String(b.status || "").toUpperCase() as Status))
+      .filter((b) => {
+        const s = String(b.status || "").toUpperCase();
+        // Wenn nichts ausgewählt: Standard (requested+approved)
+        if (statusSelected.length === 0) return s === "REQUESTED" || s === "APPROVED";
+        return statusSelected.includes(s);
+      })
+      .filter((b) => {
+        // Wenn kein Platz ausgewählt: alle
+        if (pitchSelected.length === 0) return true;
+        return pitchSelected.includes(b.pitch_id);
+      })
       .map((b) => {
         const pitch = pitchById.get(b.pitch_id)?.name ?? "Platz";
         const team = teamById.get(b.team_id)?.name ?? "Team";
-        const status = String(b.status || "").toUpperCase() as Status;
+        const status = String(b.status || "").toUpperCase();
+        const statusDE = statusLabelDE(status);
 
         const tooltipText = [
           `${pitch} – ${team}`,
-          `Status: ${status} (${STATUS_LABELS[status] ?? status})`,
+          `Status: ${statusDE}`,
           `Von: ${new Date(b.start_at).toLocaleString("de-DE")}`,
           `Bis: ${new Date(b.end_at).toLocaleString("de-DE")}`,
           b.note ? `Notiz: ${b.note}` : null,
@@ -331,13 +487,13 @@ export default function CalendarPage() {
 
         return {
           id: b.id,
-          title: `${pitch} – ${team} (${status})`,
+          title: `${pitch} – ${team} (${statusDE})`,
           start: b.start_at,
           end: b.end_at,
           extendedProps: { status, tooltipText },
         };
       });
-  }, [bookings, pitchFilter, pitchById, teamById, selectedStatusSet]);
+  }, [bookings, pitchFilter, statusFilter, pitchById, teamById]);
 
   async function logout() {
     await supabase.auth.signOut();
@@ -351,7 +507,7 @@ export default function CalendarPage() {
   const displayName = (profile?.full_name && profile.full_name.trim()) || userEmail || "User";
   const isAdmin = role === "ADMIN";
 
-  // Restore view + date
+  // ✅ Restore view + date from URL: /calendar?view=dayGridMonth&date=2026-02-09
   const url = new URL(window.location.href);
   const viewParam = url.searchParams.get("view") || "timeGridWeek";
   const dateParam = url.searchParams.get("date"); // YYYY-MM-DD
@@ -390,6 +546,7 @@ export default function CalendarPage() {
             + Antrag
           </Link>
 
+          {/* ✅ Admin: "Genehmigen" | Nicht-Admin: "Genehmigungen" (read-only Seite) */}
           <Link
             href="/approve"
             style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid #273243", textDecoration: "none" }}
@@ -407,105 +564,28 @@ export default function CalendarPage() {
       </div>
 
       {/* Filter */}
-      <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap", alignItems: "end" }}>
-        <label>
-          Platz:&nbsp;
-          <select value={pitchFilter} onChange={(e) => setPitchFilter(e.target.value)}>
-            <option value="ALL">Alle</option>
-            {pitches.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
+      <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <MultiSelectMenu
+                    label="Platz"
+          options={pitches.map((p) => ({ value: p.id, label: p.name }))}
+          selected={pitchFilter}
+          onChange={setPitchFilter}
+          defaultSelected={[]} // leer = alle Plätze
+          emptyMeansAll={true}
+        />
 
-        {/* ✅ Status Dropdown (schön) */}
-        <div ref={statusMenuRef} style={{ position: "relative" }}>
-          <div style={{ fontSize: 13, opacity: 0.95, marginBottom: 6 }}>Status</div>
-
-          <button
-            type="button"
-            onClick={() => setStatusOpen((v) => !v)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid #273243",
-              background: "#0f1620",
-              color: "#e6edf3",
-              cursor: "pointer",
-              minWidth: 260,
-              justifyContent: "space-between",
-            }}
-          >
-            <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 230 }}>
-              {statusButtonText}
-            </span>
-            <span style={{ opacity: 0.75 }}>{statusOpen ? "▲" : "▼"}</span>
-          </button>
-
-          {statusOpen && (
-            <div
-              style={{
-                position: "absolute",
-                top: "calc(100% + 8px)",
-                left: 0,
-                width: 320,
-                zIndex: 1000,
-                border: "1px solid #273243",
-                borderRadius: 12,
-                background: "rgba(15,22,32,0.98)",
-                boxShadow: "0 12px 30px rgba(0,0,0,0.35)",
-                padding: 10,
-              }}
-            >
-              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                <button type="button" onClick={selectDefaults} style={{ padding: "8px 10px" }}>
-                  Default
-                </button>
-                <button type="button" onClick={selectAll} style={{ padding: "8px 10px" }}>
-                  Alle
-                </button>
-              </div>
-
-              <div style={{ display: "grid", gap: 8 }}>
-                {STATUS_OPTIONS.map((s) => {
-                  const checked = statusFilter.includes(s);
-                  return (
-                    <label
-                      key={s}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        padding: "8px 10px",
-                        borderRadius: 10,
-                        border: "1px solid rgba(255,255,255,0.10)",
-                        background: "rgba(255,255,255,0.02)",
-                        cursor: "pointer",
-                        opacity: 1,
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleStatus(s)}
-                        style={{ width: 16, height: 16 }}
-                      />
-                      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
-                        <span style={{ fontWeight: 700 }}>{STATUS_LABELS[s]}</span>
-                        <span style={{ fontSize: 12, opacity: 0.75 }}>{s}</span>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
+        <MultiSelectMenu
+          label="Status"
+          options={[
+            { value: "REQUESTED", label: "Angefragt" },
+            { value: "APPROVED", label: "Genehmigt" },
+            { value: "REJECTED", label: "Abgelehnt" },
+          ]}
+          selected={statusFilter}
+          onChange={setStatusFilter}
+          defaultSelected={["REQUESTED", "APPROVED"]}
+          emptyMeansAll={false} // leer bedeutet hier nicht "Alle", sondern Default-Logik (requested+approved)
+        />
       </div>
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
@@ -545,7 +625,7 @@ export default function CalendarPage() {
             const s = String(arg.event.extendedProps.status || "").toUpperCase();
             return [`status-${s}`];
           }}
-          // Woche: Drag/Markieren -> Antrag (Mindestdauer 60 Minuten)
+          // ✅ Woche: Drag/Markieren -> Antrag (Mindestdauer 60 Minuten)
           selectable={true}
           selectMirror={true}
           unselectAuto={true}
@@ -567,7 +647,7 @@ export default function CalendarPage() {
 
             goToRequestNew(start, finalEnd, "timeGridWeek", start);
           }}
-          // Monat: Klick auf Tag -> Antrag (Default 12:00–13:00)
+          // ✅ Monat: Klick auf Tag -> Antrag mit Default 12:00–13:00
           dateClick={(arg) => {
             hideTip();
             if (arg.view?.type !== "dayGridMonth") return;
