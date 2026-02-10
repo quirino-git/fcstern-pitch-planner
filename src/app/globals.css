@@ -189,3 +189,9 @@ p { opacity: 0.9; }
 .fc .fc-event.status-CANCELLED .fc-event-time {
   color: #111 !important;
 }
+input[type="checkbox"]{
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 4px;
+}
