@@ -394,8 +394,8 @@ export default function CalendarClient() {
           }}
           locale={deLocale}
           firstDay={1}
-          slotMinTime="06:00:00"
-          slotMaxTime="23:00:00"
+          slotMinTime="08:00:00"
+          slotMaxTime="22:00:00"
           allDaySlot={false}
           slotDuration="00:30:00"
           snapDuration="00:30:00"
