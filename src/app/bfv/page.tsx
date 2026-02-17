@@ -155,6 +155,13 @@ function normalizeForMatch(s: string) {
     .trim();
 }
 
+function isHomeLocation(loc?: string | null): boolean {
+  // BFV: "Heimspiel" im Kontext dieser App = Spiel findet an der Feldbergstraße statt
+  const n = normalizeForMatch(loc ?? "");
+  return n.includes("feldbergstr"); // match Feldbergstr, Feldbergstraße, Feldbergstrasse, Feldbergstr.
+}
+
+
 const STOPWORDS = new Set([
   "fc",
   "tsv",
@@ -488,37 +495,17 @@ export default function BfvPage() {
 
   // ---------- Home/Away marker ----------
   function addHomeInfo(rawGames: IcsGame[], clubName: string, teamName: string) {
-    const tokens = buildMatchTokens(clubName, teamName);
-
+    // Heimspiele (für diese App) = Spiele, deren ICS-LOCATION die Feldbergstraße enthält.
+    // Damit vermeiden wir falsche Heimspiel-Erkennung über Team-/Vereinsnamen.
+    // clubName/teamName bleiben als Parameter (falls wir das später erweitern wollen).
     return rawGames.map((g) => {
-      const parts = splitHomeAway(g.summary);
-      const locNorm = normalizeForMatch(g.location || "");
-
-      const matchSide = (s: string) => {
-        const norm = normalizeForMatch(s);
-        return tokens.length ? tokens.some((t) => norm.includes(t)) : false;
-      };
-
-      let isHome: boolean | null = null;
-
-      if (parts) {
-        const leftMatch = matchSide(parts.left);
-        const rightMatch = matchSide(parts.right);
-
-        if (leftMatch && !rightMatch) isHome = true;
-        else if (rightMatch && !leftMatch) isHome = false;
-        else if (leftMatch && rightMatch) isHome = true;
-        else isHome = null;
-      } else {
-        if (tokens.length && tokens.some((t) => locNorm.includes(t))) isHome = true;
-        else isHome = null;
-      }
-
+      const hasLocation = !!(g.location && g.location.trim().length > 0);
+      const isHome = hasLocation ? isHomeLocation(g.location) : isHomeLocation(g.summary) ? true : null;
       return { ...g, isHome };
     });
   }
 
-  // ---------- Load games (single) ----------
+// ---------- Load games (single) ----------
   async function loadGamesSingle(team: BfvTeam, clubName: string) {
     const url = team.ics_url;
     if (!url) throw new Error("Für diese Mannschaft ist kein ICS-Link hinterlegt.");
@@ -533,8 +520,8 @@ export default function BfvPage() {
     let parsed = parseIcs(icsText);
     parsed = addHomeInfo(parsed, clubName, team.name);
 
-    // Filter (nur Heimspiele): unknown bleibt drin
-    const filtered = homeOnly ? parsed.filter((g) => g.isHome !== false) : parsed;
+    // Filter (nur Feldbergstraße/Heimspiele): nur g.isHome === true
+    const filtered = homeOnly ? parsed.filter((g) => g.isHome === true) : parsed;
 
     const rows: GameRow[] = filtered.map((g) => ({
       ...g,
@@ -918,7 +905,7 @@ export default function BfvPage() {
 
           <label style={{ display: "flex", gap: 10, alignItems: "center", paddingBottom: 6 }}>
             <input type="checkbox" checked={homeOnly} onChange={(e) => setHomeOnly(e.target.checked)} />
-            nur Heimspiele
+            nur Feldbergstraße
           </label>
 
           <button
