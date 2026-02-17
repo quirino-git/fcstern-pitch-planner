@@ -53,6 +53,9 @@ type GameRow = IcsGame & {
   icsUrl: string;
 };
 
+const FORCE_PREFIX = "FORCE:";
+const SEP_VALUE = "__SEP__";
+
 function pad(n: number) {
   return String(n).padStart(2, "0");
 }
@@ -257,6 +260,7 @@ export default function BfvPage() {
 
   const [bookedMap, setBookedMap] = useState<Record<string, string>>({}); // uid -> bookingId
   const [bookedPitchMap, setBookedPitchMap] = useState<Record<string, string>>({}); // uid -> pitchId
+  const [bookedForcedMap, setBookedForcedMap] = useState<Record<string, boolean>>({}); // uid -> forced overlap?
   const [selectedPitchByUid, setSelectedPitchByUid] = useState<Record<string, string>>({});
 
   const [error, setError] = useState<string | null>(null);
@@ -264,6 +268,18 @@ export default function BfvPage() {
   const [loadingGames, setLoadingGames] = useState(false);
 
   const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "ADMIN", [profile]);
+
+  const isBusy = busyUid !== null || loadingGames;
+
+  function selectionIsForced(value: string | undefined) {
+    return !!value && value.startsWith(FORCE_PREFIX);
+  }
+
+  function parsePitchSelection(value: string): { pitchId: string; forceOverlap: boolean } {
+    const forceOverlap = value.startsWith(FORCE_PREFIX);
+    const pitchId = forceOverlap ? value.slice(FORCE_PREFIX.length) : value;
+    return { pitchId, forceOverlap };
+  }
 
   const clubsById = useMemo(() => new Map(clubs.map((c) => [c.id, c.name])), [clubs]);
   const pitchesById = useMemo(() => new Map(pitches.map((p) => [p.id, p])), [pitches]);
@@ -401,6 +417,7 @@ export default function BfvPage() {
 
     const map: Record<string, string> = {};
     const pitchMap: Record<string, string> = {};
+    const forcedMap: Record<string, boolean> = {};
 
     for (const b of list) {
       const uid = findBfvUid(b.note);
@@ -412,10 +429,12 @@ export default function BfvPage() {
 
       map[uid] = b.id;
       pitchMap[uid] = b.pitch_id;
+      forcedMap[uid] = Boolean((b as any).force_overlap) || String(b.note || "").includes("[FORCE_OVERLAP:true]");
     }
 
     setBookedMap(map);
     setBookedPitchMap(pitchMap);
+    setBookedForcedMap(forcedMap);
 
     return list;
   }
@@ -668,11 +687,26 @@ export default function BfvPage() {
   }, [sessionChecked, enableBFV, isAdmin, selectedBfvTeam?.id, homeOnly, isDayPlanning, dayPlanDate]);
 
   // ---------- Book / Undo ----------
-  async function bookApproved(game: GameRow, pitchId: string) {
+  async function bookApproved(game: GameRow, pitchSelection: string) {
     setBusyUid(game.uid);
     setError(null);
 
     try {
+      if (!pitchSelection || pitchSelection === SEP_VALUE) {
+        throw new Error("Bitte zuerst einen Platz auswählen.");
+      }
+
+      const { pitchId, forceOverlap } = parsePitchSelection(pitchSelection);
+      if (!pitchId) throw new Error("Bitte zuerst einen Platz auswählen.");
+
+      if (forceOverlap) {
+        const pitchName = pitches.find((p) => p.id === pitchId)?.name || "(unbekannter Platz)";
+        const ok = window.confirm(
+          `${pitchName} ist aktuell nicht frei.\n\nTrotzdem buchen (Überlappungen zulassen)?\n\nHinweis: Dieser Slot wird dann gelb markiert.`
+        );
+        if (!ok) return;
+      }
+
       const { data } = await supabase.auth.getSession();
       const uid = data.session?.user?.id;
       if (!uid) throw new Error("Session fehlt – bitte neu einloggen.");
@@ -684,35 +718,52 @@ export default function BfvPage() {
         );
       }
 
-      const note = `[BFV] ${game.bfvClubName} – ${game.bfvTeamName}\n${game.summary}\n[BFV_TEAM_ID:${game.bfvTeamId}]\n[BFV_UID:${game.uid}]`;
+      const noteBase = `[BFV] ${game.bfvClubName} – ${game.bfvTeamName}\n${game.summary}\n[BFV_TEAM_ID:${game.bfvTeamId}]\n[BFV_UID:${game.uid}]`;
+      const note = forceOverlap ? `${noteBase}\n[FORCE_OVERLAP:true]` : noteBase;
+
+      const insertRow: any = {
+        start_at: game.start.toISOString(),
+        end_at: game.end.toISOString(),
+        status: "APPROVED",
+        note,
+        pitch_id: pitchId,
+        team_id: localTeamId,
+        created_by: uid,
+      };
+      // Optional: erlaubt bewusstes Buchen trotz Überlappung (DB-Änderung erforderlich: force_overlap boolean)
+      if (forceOverlap) insertRow.force_overlap = true;
 
       const { data: ins, error: insErr } = await supabase
         .from("bookings")
-        .insert({
-          start_at: game.start.toISOString(),
-          end_at: game.end.toISOString(),
-          status: "APPROVED",
-          note,
-          pitch_id: pitchId,
-          team_id: localTeamId,
-          created_by: uid,
-        })
+        .insert(insertRow)
         .select("id,pitch_id")
         .maybeSingle();
 
       if (insErr) throw insErr;
 
-      // Reload bookings/map (damit Zustand auch nach reload stimmt)
-      if (range) await loadBookingsForRange(range.start, range.end);
-
       if (ins?.id) {
         setBookedMap((m) => ({ ...m, [game.uid]: ins.id }));
         setBookedPitchMap((m) => ({ ...m, [game.uid]: pitchId }));
-        setSelectedPitchByUid((m) => ({ ...m, [game.uid]: pitchId }));
+        setBookedForcedMap((m) => ({ ...m, [game.uid]: forceOverlap }));
+        // Auswahl zurücksetzen (verhindert "Stale"/Doppelklick-Effekte)
+        setSelectedPitchByUid((m) => ({ ...m, [game.uid]: "" }));
       }
+
+      // 1) Automatisch dasselbe wie "Aktualisieren" ausführen (damit Verfügbarkeiten sauber neu berechnet werden)
+      await loadGames();
     } catch (e: any) {
       console.error(e);
-      setError(e?.message || "Fehler beim Buchen.");
+      const msg = e?.message || "Fehler beim Buchen.";
+      setError(msg);
+
+      // Falls Overlap-Constraint zuschlägt, sofort neu laden (damit UI nicht mit alten Daten weiterarbeitet)
+      if (String(e?.code) === "23P01" || String(msg).includes("bookings_no_overlap")) {
+        try {
+          await loadGames();
+        } catch {
+          // ignore
+        }
+      }
     } finally {
       setBusyUid(null);
     }
@@ -737,6 +788,11 @@ export default function BfvPage() {
         return copy;
       });
       setBookedPitchMap((m) => {
+        const copy = { ...m };
+        delete copy[gameUid];
+        return copy;
+      });
+      setBookedForcedMap((m) => {
         const copy = { ...m };
         delete copy[gameUid];
         return copy;
@@ -867,7 +923,7 @@ export default function BfvPage() {
 
           <button
             onClick={loadGames}
-            disabled={loadingGames || (isDayPlanning ? !dayPlanDate : !selectedBfvTeamId)}
+            disabled={isBusy || (isDayPlanning ? !dayPlanDate : !selectedBfvTeamId)}
             style={{ padding: "10px 14px", borderRadius: 12 }}
           >
             {loadingGames ? "Lade…" : "Aktualisieren"}
@@ -908,7 +964,7 @@ export default function BfvPage() {
                 <th style={{ padding: 10, borderBottom: "1px solid #273243" }}>Von</th>
                 <th style={{ padding: 10, borderBottom: "1px solid #273243" }}>Bis</th>
                 <th style={{ padding: 10, borderBottom: "1px solid #273243" }}>Freie Plätze</th>
-                <th style={{ padding: 10, borderBottom: "1px solid #273243", minWidth: 220 }}>Aktion</th>
+                <th style={{ padding: 10, borderBottom: "1px solid #273243" }}>Aktion</th>
               </tr>
             </thead>
             <tbody>
@@ -916,8 +972,14 @@ export default function BfvPage() {
                 const isBooked = !!bookedMap[g.uid];
                 const busy = busyUid === g.uid;
 
+                const candidates = allowedPitchesForAge(g.bfvAgeU);
                 const avail = getAvailablePitches(g);
+                const availIds = new Set(avail.map((p) => p.id));
+                const blocked = candidates.filter((p) => !availIds.has(p.id));
+
                 const selectedPitch = selectedPitchByUid[g.uid] || "";
+                const forcedSelected = selectionIsForced(selectedPitch);
+                const forcedBooked = !!bookedForcedMap[g.uid];
 
                 const bookedPitchId = bookedPitchMap[g.uid] || "";
                 const bookedPitchName = bookedPitchId ? (pitchesById.get(bookedPitchId)?.name ?? bookedPitchId) : "";
@@ -954,82 +1016,153 @@ export default function BfvPage() {
                       {fmtTimeDE(g.end)}
                     </td>
 
-                    <td style={{ padding: 10, borderBottom: "1px solid rgba(255,255,255,0.08)", whiteSpace: "nowrap", minWidth: 220 }}>
+                    <td
+                      style={{
+                        padding: 10,
+                        borderBottom: "1px solid rgba(255,255,255,0.08)",
+                        background: forcedSelected
+                          ? "rgba(250, 204, 21, 0.08)"
+                          : "transparent",
+                        borderRadius: 12,
+                      }}
+                    >
                       {isBooked ? (
                         <div
                           style={{
                             minWidth: 280,
-                            height: 40,
-                            padding: "0 12px",
+                            padding: "8px 10px",
                             borderRadius: 10,
-                            border: "1px solid rgba(255,255,255,0.18)",
-                            background: "rgba(40, 160, 80, 0.20)",
+                            border: forcedBooked
+                              ? "1px solid rgba(250, 204, 21, 0.55)"
+                              : "1px solid rgba(255,255,255,0.18)",
+                            background: forcedBooked
+                              ? "rgba(250, 204, 21, 0.22)"
+                              : "rgba(40, 160, 80, 0.20)",
                             fontWeight: 800,
-                            fontSize: 13,
-                            display: "flex",
-                            alignItems: "center",
                           }}
                         >
                           {bookedPitchName || "Gebucht"}
                         </div>
-                      ) : avail.length === 0 ? (
+                      ) : candidates.length === 0 ? (
                         <span style={{ color: "crimson", fontWeight: 700 }}>keine</span>
                       ) : (
                         <select
                           value={selectedPitch}
-                          onChange={(e) => setSelectedPitchByUid((m) => ({ ...m, [g.uid]: e.target.value }))}
-                          style={{ minWidth: 280 }}
+                          disabled={isBusy}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v === SEP_VALUE) return;
+                            setSelectedPitchByUid((m) => ({ ...m, [g.uid]: v }));
+                          }}
+                          style={{
+                            minWidth: 280,
+                            padding: "8px 10px",
+                            borderRadius: 10,
+                            border: forcedSelected
+                              ? "1px solid rgba(250, 204, 21, 0.55)"
+                              : "1px solid rgba(255,255,255,0.18)",
+                            background: forcedSelected
+                              ? "rgba(250, 204, 21, 0.18)"
+                              : "rgba(255,255,255,0.06)",
+                            color: "white",
+                            outline: "none",
+                            cursor: isBusy ? "not-allowed" : "pointer",
+                          }}
                         >
+                          <option value="" style={{ backgroundColor: "#0b1220", color: "rgba(255,255,255,0.8)" }}>
+                          Platz wählen…
+                        </option>
+
                           {avail.map((p) => (
-                            <option key={p.id} value={p.id}>
+                            <option
+                              key={p.id}
+                              value={p.id}
+                              style={{ backgroundColor: "#0b1220", color: "#e5e7eb" }}
+                            >
                               {p.name}
                             </option>
                           ))}
+
+                          {blocked.length > 0 && (
+                            <>
+                              <option
+                                disabled
+                                value={SEP_VALUE}
+                                style={{
+                                  backgroundColor: "#0b1220",
+                                  color: "rgba(255,255,255,0.55)",
+                                }}
+                              >
+                                ──────── nicht frei ────────
+                              </option>
+                              {blocked.map((p) => (
+                                <option
+                                  key={`force-${p.id}`}
+                                  value={`${FORCE_PREFIX}${p.id}`}
+                                  style={{
+                                    backgroundColor: "rgba(250, 204, 21, 0.18)",
+                                    color: "#111827",
+                                  }}
+                                >
+                                  {p.name} (nicht frei, trotzdem buchen)
+                                </option>
+                              ))}
+                            </>
+                          )}
                         </select>
                       )}
                     </td>
 
-                    <td style={{ padding: 10, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+                    <td
+                      style={{
+                        padding: 10,
+                        borderBottom: "1px solid rgba(255,255,255,0.08)",
+                        textAlign: "right",
+                        minWidth: 190,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {isBooked ? (
                         <button
-                          disabled={busy}
+                          disabled={isBusy || busy}
                           onClick={() => undoBooking(g.uid)}
                           style={{
-                            height: 40,
-                            minWidth: 190,
-                            padding: "0 12px",
+                            padding: "8px 12px",
                             borderRadius: 10,
                             fontWeight: 800,
-                            fontSize: 13,
+                            cursor: isBusy || busy ? "not-allowed" : "pointer",
+                            border: "1px solid rgba(255,255,255,0.22)",
+background: "rgba(40, 160, 80, 0.25)",
+                            color: "rgba(220,255,235,0.95)",
                             whiteSpace: "nowrap",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            cursor: busy ? "not-allowed" : "pointer",
-                            border: "1px solid rgba(255,255,255,0.18)",
-                            background: "rgba(40, 160, 80, 0.25)",
+                            opacity: isBusy || busy ? 0.6 : 1,
                           }}
                         >
-                          Platz gebucht, zurück nehmen
+                          Buchung zurücknehmen
                         </button>
                       ) : (
                         <button
-                          disabled={busy || avail.length === 0 || !selectedPitch}
+                          disabled={isBusy || busy || candidates.length === 0 || !selectedPitch}
                           onClick={() => bookApproved(g, selectedPitch)}
                           style={{
-                            height: 40,
-                            minWidth: 190,
-                            padding: "0 12px",
+                            padding: "8px 12px",
                             borderRadius: 10,
                             fontWeight: 800,
-                            fontSize: 13,
+                            cursor:
+                              isBusy || busy || candidates.length === 0 || !selectedPitch
+                                ? "not-allowed"
+                                : "pointer",
+                            border: "1px solid rgba(255,255,255,0.18)",
+                            background: "rgba(255,255,255,0.08)",
+                            color: "white",
                             whiteSpace: "nowrap",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
+                            opacity:
+                              isBusy || busy || candidates.length === 0 || !selectedPitch
+                                ? 0.5
+                                : 1,
                           }}
                         >
-                          direkt genehmigt anlegen
+                          Buchen
                         </button>
                       )}
                     </td>
