@@ -1,430 +1,840 @@
-import { NextResponse } from "next/server";
-import crypto from "crypto";
+import { NextRequest, NextResponse } from "next/server";
+
+/**
+ * BFV ICS proxy/normalizer (service.bfv.de)
+ *
+ * Supabase stores URLs like:
+ *   https://service.bfv.de/rest/icsexport/teammatches/teamPermanentId/<TEAM_PERMANENT_ID>
+ * (or webcal://... which we normalize to https://)
+ *
+ * This route:
+ *  - fetches the ICS
+ *  - parses VEVENTS
+ *  - re-emits a clean UTF-8 ICS (stable encoding + optional field normalization)
+ */
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const HOME_FALLBACK_LOCATION =
-  "BSA Feldbergstraße, Feldbergstr. 65, 81825 München";
-
-/* =========================
-   Security / fetch helpers
-========================= */
+type IcsEvent = {
+  uid: string;
+  start: string; // DTSTART raw
+  end: string;   // DTEND raw
+  summary: string;
+  location: string;
+  description: string;
+  status: string;
+};
 
 function isAllowedHost(host: string) {
   const h = host.toLowerCase();
-  return (
-    h === "service.bfv.de" ||
-    h === "bfv.de" ||
-    h.endsWith(".bfv.de") ||
-    h === "app.bfv.de" ||
-    h.endsWith(".app.bfv.de")
-  );
+  return h === "service.bfv.de" || h === "bfv.de" || h.endsWith(".bfv.de");
+}
+
+function normalizeSourceUrl(raw: string) {
+  const s = (raw || "").trim();
+  if (s.startsWith("webcal://")) return "https://" + s.slice("webcal://".length);
+  return s;
 }
 
 function looksLikeIcs(text: string) {
-  return /BEGIN:VCALENDAR/i.test(text);
+  return /BEGIN:VCALENDAR/i.test(text) && /BEGIN:VEVENT/i.test(text);
 }
 
-async function fetchText(url: string) {
-  const res = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      "accept-language": "de-DE,de;q=0.9,en;q=0.8",
-      accept: "text/html,*/*",
-    },
-    cache: "no-store",
-    redirect: "follow",
-  });
-
-  const text = await res.text().catch(() => "");
-  return { ok: res.ok, status: res.status, text };
+/**
+ * Normalize newlines to \n and unfold RFC5545 folded lines.
+ * Folded lines are CRLF + space/tab, or LF + space/tab.
+ */
+function normalizeAndUnfoldIcs(text: string) {
+  const n = (text || "").replace(/\r\n/g, "\n");
+  return n.replace(/\n[ \t]/g, "");
 }
 
-/* =========================
-   Small utils
-========================= */
-
-function pad(n: number) {
-  return String(n).padStart(2, "0");
+function icsUnescape(s: string) {
+  return (s || "")
+    .replace(/\\n/gi, "\n") // keep as newline later? (we return real newlines)
+    .replace(/\\,/g, ",")
+    .replace(/\\;/g, ";")
+    .replace(/\\\\/g, "\\")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n");
 }
 
-function formatIcsLocal(dt: Date) {
-  return (
-    dt.getFullYear() +
-    pad(dt.getMonth() + 1) +
-    pad(dt.getDate()) +
-    "T" +
-    pad(dt.getHours()) +
-    pad(dt.getMinutes()) +
-    "00"
-  );
+/** Return *real* newline for \n sequences */
+function icsUnescapeToText(s: string) {
+  return (s || "")
+    .replace(/\\n/gi, "\n") // normalize
+    .replace(/\\\\/g, "\\")
+    .replace(/\\,/g, ",")
+    .replace(/\\;/g, ";")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n")
+    .replace(/\\n/gi, "\n");
 }
 
-function addMinutes(d: Date, minutes: number) {
-  return new Date(d.getTime() + minutes * 60_000);
-}
-
-function escapeIcsValue(s: string) {
+function icsEscape(s: string) {
   return (s || "")
     .replace(/\\/g, "\\\\")
-    .replace(/\n/g, "\\n")
-    .replace(/;/g, "\\;")
-    .replace(/,/g, "\\,");
+    .replace(/\r?\n/g, "\\n")
+    .replace(/,/g, "\\,")
+    .replace(/;/g, "\\;");
 }
 
-// For your GUI: do NOT fold lines (some parsers/UI get weird)
-function foldLine(line: string) {
-  return [line];
+function pickLine(block: string, key: string) {
+  const re = new RegExp(`(?:^|\\n)${key}[^:]*:(.*?)(?=\\n[A-Z-]+(?:;|:)|\\nEND:|$)`, "i");
+  const m = block.match(re);
+  return m ? m[1].trim() : "";
 }
 
-function uidFrom(summary: string, start: Date) {
-  const key = `${start.toISOString()}|${summary}`;
-  return crypto.createHash("sha1").update(key).digest("hex");
-}
+function parseIcsEvents(icsRaw: string): IcsEvent[] {
+  const ics = normalizeAndUnfoldIcs(icsRaw);
+  const parts = ics.split("BEGIN:VEVENT").slice(1);
 
-/* =========================
-   Text cleaning
-========================= */
+  const events: IcsEvent[] = [];
+  for (const p of parts) {
+    const block = "BEGIN:VEVENT" + p;
+    const uid = pickLine(block, "UID");
+    const dtStart = pickLine(block, "DTSTART");
+    const dtEnd = pickLine(block, "DTEND");
+    if (!dtStart || !dtEnd) continue;
 
-function cleanText(s: string) {
-  let t = s || "";
+    const summary = icsUnescape(pickLine(block, "SUMMARY"));
+    const location = icsUnescape(pickLine(block, "LOCATION"));
+    const description = icsUnescape(pickLine(block, "DESCRIPTION"));
+    const status = icsUnescape(pickLine(block, "STATUS"));
 
-  // Remove scripts/styles
-  t = t.replace(/<script[\s\S]*?<\/script>/gi, " ");
-  t = t.replace(/<style[\s\S]*?<\/style>/gi, " ");
-
-  // Remove svg blocks
-  t = t.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
-
-  // Convert tags to spaces
-  t = t.replace(/<[^>]*>/g, " ");
-
-  // HTML entities & nbsp
-  t = t.replace(/&nbsp;|&#160;/gi, " ");
-  t = t.replace(/\u00a0/g, " ");
-
-  // Collapse spaces
-  t = t.replace(/\s+/g, " ").trim();
-
-  return t;
-}
-
-function cleanBfvSummary(s: string) {
-  let t = cleanText(s);
-
-  // Kill BFV image-component attribute garbage that sometimes leaks into text windows
-  t = t.replace(/\bdata-[a-z0-9_-]+\s*=\s*[^\s]+\b/gi, " ");
-  t = t.replace(/\bloading\s*=\s*[^\s]+\b/gi, " ");
-  t = t.replace(/\bdata-module\s*=\s*[^\s]+\b/gi, " ");
-  t = t.replace(/\bBfvImage\b/gi, " ");
-
-  // Remove stray pipes/slashes that appear from layout
-  t = t.replace(/[|]/g, " ");
-  t = t.replace(/\s+\/\s+/g, " - ");
-  t = t.replace(/\s+/g, " ").trim();
-
-  // Normalize dash variants a bit
-  t = t.replace(/[–—]/g, "-").replace(/\s*-\s*/g, " - ").replace(/\s+/g, " ").trim();
-
-  // Trim leading junk
-  t = t.replace(/^[-\s:]+/g, "").trim();
-
-  return t;
-}
-
-/* =========================
-   Auto "Mehr anzeigen" / partial loader
-========================= */
-
-function extractTeamIdFromBfvTeamUrl(teamUrl: string): string | "" {
-  const m = teamUrl.match(/\/([0-9A-Z]{24,32})\/?$/);
-  return m ? m[1] : "";
-}
-
-function buildDefaultMoreUrl(teamId: string) {
-  return `https://www.bfv.de/partial/mannschaftsprofil/spielplan/${teamId}/naechste?wettbewerbsart=1&spieltyp=ALLE&from=0&size=5`;
-}
-
-function setFrom(url: string, from: number) {
-  const u = new URL(url);
-  u.searchParams.set("from", String(from));
-  return u.toString();
-}
-
-async function loadBfvPartialSpielplanAll(moreUrl: string, maxPages = 12) {
-  const u0 = new URL(moreUrl);
-  const size = Number(u0.searchParams.get("size") || "5") || 5;
-
-  const parts: string[] = [];
-  const seenHashes = new Set<string>();
-
-  for (let page = 0; page < maxPages; page++) {
-    const from = page * size;
-    const url = setFrom(moreUrl, from);
-
-    const { ok, text } = await fetchText(url);
-    if (!ok || !text || text.length < 50) break;
-
-    const h = crypto.createHash("sha1").update(text).digest("hex");
-    if (seenHashes.has(h)) break;
-    seenHashes.add(h);
-
-    parts.push(text);
+    events.push({
+      uid: uid || `${dtStart}-${summary}`.slice(0, 200),
+      start: dtStart,
+      end: dtEnd,
+      summary,
+      location,
+      description,
+      status,
+    });
   }
-
-  return parts.join("\n");
+  return events;
 }
 
-/* =========================
-   Robust team matching (fixes FC Stern issues)
-========================= */
-
-function normalizeText(s: string) {
-  return (s || "")
-    .toLowerCase()
-    .replace(/ß/g, "ss")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function normalizeSummary(summary: string) {
+  return (summary || "").replace(/\s+/g, " ").trim();
 }
 
-function teamKeyFromTeamUrl(teamUrl: string) {
-  let slug = "";
-  try {
-    const u = new URL(teamUrl);
-    const segs = u.pathname.split("/").filter(Boolean);
-    const i = segs.findIndex((p) => p === "mannschaften");
-    if (i >= 0) slug = segs[i + 1] || "";
-  } catch {
-    // ignore
-  }
-
-  // Remove trailing roman suffix in slug (…-u9-i, …-u8-ii, …-u9-1 etc.)
-  slug = slug.replace(/-(i|ii|iii|iv|v|vi|vii|viii|ix|x)$/i, "");
-
-  return normalizeText(slug);
+function normalizeLocation(location: string) {
+  let s = (location || "").trim();
+  s = s
+    .replace(/M├╝nchen/g, "München")
+    .replace(/Stra├ƒe/g, "Straße")
+    .replace(/Feldbergstra├ƒe/g, "Feldbergstraße");
+  return s.replace(/\s+/g, " ").trim();
 }
 
-function tokensFromTeamKey(teamKey: string) {
-  const stop = new Set(["fc", "sv", "tsv", "sc", "spvgg", "sg", "dj", "u"]);
-  const toks = normalizeText(teamKey)
-    .split(" ")
-    .filter(Boolean)
-    .filter((t) => t.length >= 2 && !stop.has(t));
+const HOME_FALLBACK_LOCATION =
+  "BSA Feldbergstraße, Feldbergstr. 65, 81825 München";
 
-  // Prefer club + uXX if present
-  return toks;
+function isFestivalSummary(summary: string) {
+  return /kinderfestival/i.test(summary || "");
 }
 
-function containsEnoughTokens(text: string, teamKey: string) {
-  const t = normalizeText(text);
-  const toks = tokensFromTeamKey(teamKey);
-
-  if (toks.length === 0) return false;
-
-  const hits = toks.filter((tok) => t.includes(tok));
-  // Require at least 2 hits (or all if only 1 token)
-  const need = toks.length === 1 ? 1 : 2;
-  return hits.length >= need;
+/**
+ * For festival rows the BFV-ICS SUMMARY looks like:
+ *   "FC Stern München U9-I - Kinderfestival-FC Stern München U9-I, ..."
+ *   "ESV München U9-I - Kinderfestival-FC Stern München U9-I, ..."
+ *
+ * We treat the *host/ausrichter* as the part BEFORE "Kinderfestival".
+ */
+function festivalHostFromSummary(summary: string) {
+  const s0 = (summary || "").replace(/\s+/g, " ").trim();
+  const idx = s0.toLowerCase().indexOf("kinderfestival");
+  if (idx < 0) return "";
+  let host = s0.slice(0, idx);
+  // remove trailing separators like "-" / "–" / "—" and surrounding spaces
+  host = host.replace(/[\s\-–—:]+$/g, "").trim();
+  return host;
 }
 
-/* =========================
-   Location extraction
-========================= */
+function isHomeFestival(summary: string) {
+  // BFV teammatches ICS often has empty LOCATION for Kinderfestival.
+  // Pattern is typically: "<HOST> - Kinderfestival - <TEAM>\, ..."
+  // We treat it as a home festival only if HOST and TEAM belong to the same club.
+  if (!isFestivalSummary(summary)) return false;
 
-function normalizeSpaces(s: string) {
-  return (s || "").replace(/\s+/g, " ").trim();
-}
+  const parts = summary.split(/\s*-\s*Kinderfestival\s*-\s*/i);
+  if (parts.length < 2) return false;
 
-function looksLikeAddress(text: string) {
-  return (
-    /\bstr\.?\b|\bstraße\b|\bweg\b|\bplatz\b|\ballee\b/i.test(text) &&
-    (/\b\d{5}\b/.test(text) || /\b\d{1,4}\b/.test(text))
-  );
-}
+  const hostRaw = (parts[0] || "").trim();
+  const teamRaw = (parts[1] || "").trim();
 
-function extractLocationFromTextWindow(textWindow: string): string {
-  const t = normalizeSpaces(textWindow);
-
-  const m1 = t.match(
-    /((?:BSA|Sportanlage|Sportzentrum|Stadion|Platz|Anlage)[^,]{0,90})(?:,?\s*)([^,]{0,160}?(?:straße|str\.|weg|allee|platz)\s*\d{1,4}[^,]{0,80}\s*\b\d{5}\b\s*[A-Za-zÄÖÜäöüß\- ]{2,})/i
-  );
-  if (m1) return normalizeSpaces(`${m1[1]}, ${m1[2]}`);
-
-  const m2 = t.match(
-    /([A-Za-zÄÖÜäöüß0-9 \-]{3,80}(?:straße|str\.|weg|allee|platz)\s*\d{1,4}[^,]{0,60}\s*\b\d{5}\b\s*[A-Za-zÄÖÜäöüß\- ]{2,})/i
-  );
-  if (m2) return normalizeSpaces(m2[1]);
-
-  const plz = t.match(/\b\d{5}\b/);
-  if (plz) {
-    const idx = t.indexOf(plz[0]);
-    const slice = t.slice(Math.max(0, idx - 120), Math.min(t.length, idx + 120));
-    if (looksLikeAddress(slice)) return normalizeSpaces(slice);
-  }
-
-  return "";
-}
-
-/* =========================
-   Home/Away extraction
-========================= */
-
-function isFestival(summaryClean: string) {
-  return /kinderfestival/i.test(summaryClean);
-}
-
-function extractHostTeam(summaryClean: string) {
-  const s = summaryClean.replace(/[–—]/g, "-");
-
-  // Kinderfestival: keep "U8 - I" intact by cutting at " - Kinderfestival"
-  const mf = s.match(/^(.*?)\s*-\s*kinderfestival\b/i);
-  if (mf && mf[1]) return mf[1].trim();
-
-  // Normal matches often contain " - : - " as delimiter between home/away
-  const mm = s.match(/^(.*?)\s*-\s*:\s*-\s*(.*)$/);
-  if (mm && mm[1]) return mm[1].trim();
-
-  // Fallback: first chunk
-  const parts = s.split(" - ");
-  return (parts[0] || s).trim();
-}
-
-function isHomeGame(summaryClean: string, teamKey: string) {
-  const host = extractHostTeam(summaryClean);
-  return containsEnoughTokens(host, teamKey);
-}
-
-/* =========================
-   Parsing
-========================= */
-
-type ParsedEvent = {
-  uid: string;
-  start: Date;
-  end: Date;
-  summary: string;
-  location: string;
-};
-
-function parseAllFromHtml(html: string, teamUrl: string) {
-  const events: ParsedEvent[] = [];
-  const seen = new Set<string>();
-
-  const teamKey = teamKeyFromTeamUrl(teamUrl);
-
-  const re =
-    /(\d{2})\.(\d{2})\.(\d{4})[^0-9]{0,120}(\d{1,2})[:.](\d{2})(?:\s*Uhr)?/gi;
-
-  let m: RegExpExecArray | null;
-  let matches = 0;
-  let skippedSeasonHistory = 0;
-  let skippedDupes = 0;
-  let skippedAbgesetzt = 0;
-
-  while ((m = re.exec(html)) !== null) {
-    matches++;
-
-    const dd = Number(m[1]);
-    const mm = Number(m[2]);
-    const yyyy = Number(m[3]);
-    const hh = Number(m[4]);
-    const mi = Number(m[5]);
-
-    const start = new Date(yyyy, mm - 1, dd, hh, mi, 0);
-
-    const windowHtml = html.slice(m.index, Math.min(html.length, m.index + 5200));
-    const textWindow = cleanText(windowHtml);
-
-    const afterTime = textWindow
-      .replace(/^.*?\d{1,2}[:.]\d{2}(?:\s*Uhr)?/i, "")
-      .replace(/Zum Spiel.*$/i, "")
+  // Cut off trailing meta (escaped commas, commas, newlines)
+  const cut = (s: string) =>
+    s
+      .split(/\\,|,|\\n|\\r|\n|\r/)[0]
+      .replace(/\\+/g, "")
       .trim();
 
-    let summaryRaw = cleanBfvSummary(afterTime);
-    if (!summaryRaw) {
-      summaryRaw = cleanBfvSummary(textWindow.slice(0, 240));
-      if (!summaryRaw) continue;
-    }
+  const normalize = (s: string) =>
+    cut(s)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+      .trim();
 
-    const sumLower = summaryRaw.toLowerCase();
-
-    // Skip season/history blocks
-    if (sumLower.includes("historie") || sumLower.includes("saison")) {
-      skippedSeasonHistory++;
-      continue;
-    }
-
-    // Optional: skip abgesetzt (you said it's fine to keep, but it helps)
-    if (sumLower.includes("abgesetzt")) {
-      skippedAbgesetzt++;
-      continue;
-    }
-
-    const uid = uidFrom(summaryRaw, start);
-    if (seen.has(uid)) {
-      skippedDupes++;
-      continue;
-    }
-    seen.add(uid);
-
-    const end = addMinutes(start, 90);
-
-    const summary = summaryRaw;
-
-    const festival = isFestival(summary);
-    void festival; // for future use
-
-    const home = isHomeGame(summary, teamKey);
-
-    let location = extractLocationFromTextWindow(textWindow);
-
-    if (!location) {
-      if (home) location = HOME_FALLBACK_LOCATION;
-      else location = "Auswärts";
-    }
-
-    events.push({ uid, start, end, summary, location });
-  }
-
-  events.sort((a, b) => a.start.getTime() - b.start.getTime());
-
-  return {
-    events,
-    matches,
-    hasUhr: /Uhr/i.test(html),
-    skippedSeasonHistory,
-    skippedDupes,
-    skippedAbgesetzt,
-    teamKey,
+  // Reduce to club name by stripping trailing age/team identifiers (e.g. "U9-II", "U8 I", etc.)
+  const clubBase = (s: string) => {
+    const n = normalize(s);
+    // remove "u9", "u10" and anything after it
+    const base = n.replace(/\bu\d{1,2}\b.*$/i, "").trim();
+    return base || n;
   };
+
+  const hostClub = clubBase(hostRaw);
+  const teamClub = clubBase(teamRaw);
+
+  return hostClub.length > 0 && hostClub === teamClub;
 }
 
-/* =========================
-   ICS builder
-========================= */
+function fillMissingLocation(ev: IcsEvent, inferredHomeLocation: string) {
+  const loc = (ev.location || "").trim();
+  if (loc) return ev;
 
-function buildIcs(events: ParsedEvent[]) {
+  if (isFestivalSummary(ev.summary)) {
+    if (isHomeFestival(ev.summary)) {
+      return {
+        ...ev,
+        location: inferredHomeLocation || HOME_FALLBACK_LOCATION,
+      };
+    }
+    return { ...ev, location: "Auswärts" };
+  }
+
+  return { ...ev, location: "Ort nicht im BFV-ICS" };
+}
+
+
+function buildIcs(events: IcsEvent[]) {
   const lines: string[] = [];
   lines.push("BEGIN:VCALENDAR");
   lines.push("VERSION:2.0");
-  lines.push("PRODID:-//FCSternPitchPlanner//BFV HTML to ICS (ROBUST_HOME)//DE");
+  lines.push("PRODID:-//FCSternPitchPlanner//BFV ICS Proxy//DE");
   lines.push("CALSCALE:GREGORIAN");
 
-  const dtstamp = formatIcsLocal(new Date());
+  const now = new Date();
+  const dtstamp =
+    now.getUTCFullYear().toString() +
+    String(now.getUTCMonth() + 1).padStart(2, "0") +
+    String(now.getUTCDate()).padStart(2, "0") +
+    "T" +
+    String(now.getUTCHours()).padStart(2, "0") +
+    String(now.getUTCMinutes()).padStart(2, "0") +
+    String(now.getUTCSeconds()).padStart(2, "0") +
+    "Z";
 
   for (const e of events) {
     lines.push("BEGIN:VEVENT");
-    lines.push(...foldLine(`UID:${escapeIcsValue(e.uid)}`));
+    lines.push(`UID:${icsEscape(e.uid)}`);
     lines.push(`DTSTAMP:${dtstamp}`);
-    lines.push(`DTSTART:${formatIcsLocal(e.start)}`);
-    lines.push(`DTEND:${formatIcsLocal(e.end)}`);
-    lines.push(...foldLine(`SUMMARY:${escapeIcsValue(e.summary)}`));
-    lines.push(...foldLine(`LOCATION:${escapeIcsValue(e.location)}`));
+    lines.push(`DTSTART:${e.start}`);
+    lines.push(`DTEND:${e.end}`);
+    lines.push(`SUMMARY:${icsEscape(e.summary)}`);
+    if (e.location) lines.push(`LOCATION:${icsEscape(e.location)}`);
+    if (e.description) lines.push(`DESCRIPTION:${icsEscape(e.description)}`);
+    if (e.status) lines.push(`STATUS:${icsEscape(e.status)}`);
     lines.push("END:VEVENT");
   }
 
@@ -432,112 +842,109 @@ function buildIcs(events: ParsedEvent[]) {
   return lines.join("\r\n") + "\r\n";
 }
 
-/* =========================
-   Route
-========================= */
-
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const url = searchParams.get("url");
+  const raw = searchParams.get("url");
   const debug = searchParams.get("debug") === "1";
-  const moreUrlParam = searchParams.get("moreUrl") || "";
 
-  if (!url) {
+  if (!raw) {
     return NextResponse.json({ error: "Missing url query param" }, { status: 400 });
   }
 
+  const sourceUrl = normalizeSourceUrl(decodeURIComponent(raw));
+
   let u: URL;
   try {
-    u = new URL(url);
+    u = new URL(sourceUrl);
   } catch {
     return NextResponse.json({ error: "Invalid url" }, { status: 400 });
   }
 
   if (u.protocol !== "https:") {
-    return NextResponse.json({ error: "Only https allowed" }, { status: 400 });
+    return NextResponse.json({ error: "Only https/webcal supported" }, { status: 400 });
   }
   if (!isAllowedHost(u.hostname)) {
     return NextResponse.json({ error: "Host not allowed" }, { status: 403 });
   }
 
-  const { ok, status, text } = await fetchText(u.toString());
-  if (!ok) {
+  const res = await fetch(u.toString(), {
+    cache: "no-store",
+    redirect: "follow",
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      accept: "text/calendar,text/plain,text/html,*/*",
+      "accept-language": "de-DE,de;q=0.9,en;q=0.8",
+    },
+  });
+
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
     return NextResponse.json(
-      { error: "BFV fetch failed", status, text: (text || "").slice(0, 800) },
+      { error: "BFV fetch failed", status: res.status, text: text.slice(0, 1200) },
       { status: 502 }
     );
   }
 
-  // Passthrough for real ICS
-  if (looksLikeIcs(text)) {
-    return new NextResponse(text, {
-      status: 200,
-      headers: {
-        "content-type": "text/calendar; charset=utf-8",
-        "cache-control": "no-store",
-      },
-    });
-  }
-
-  // Auto moreUrl
-  let moreUrl = moreUrlParam;
-  let moreUrlAuto = false;
-
-  if (!moreUrl) {
-    const teamId = extractTeamIdFromBfvTeamUrl(u.toString());
-    if (teamId) {
-      moreUrl = buildDefaultMoreUrl(teamId);
-      moreUrlAuto = true;
+  if (!looksLikeIcs(text)) {
+    if (debug) {
+      return NextResponse.json({
+        sourceUrl: u.toString(),
+        fetchedLen: text.length,
+        head: text.slice(0, 400),
+        note:
+          "Response did not look like ICS. Store a service.bfv.de icsexport URL like https://service.bfv.de/rest/icsexport/teammatches/teamPermanentId/....",
+      });
     }
+    return NextResponse.json(
+      { error: "Not an ICS response from BFV", head: text.slice(0, 300) },
+      { status: 400 }
+    );
   }
 
-  let combinedHtml = text;
-  let partialLen = 0;
+  const normalized = parseIcsEvents(text).map((e) => ({
+    ...e,
+    summary: normalizeSummary(e.summary),
+    location: normalizeLocation(e.location),
+  }));
 
-  if (moreUrl) {
-    try {
-      const mu = new URL(moreUrl);
-      if (isAllowedHost(mu.hostname)) {
-        const partial = await loadBfvPartialSpielplanAll(moreUrl, 12);
-        partialLen = partial.length;
-        if (partial) combinedHtml += "\n" + partial;
-      }
-    } catch {
-      // ignore invalid moreUrl
-    }
-  }
+  // Best-effort "home" location inference from any event that contains a real address.
+  const inferredHomeLocation =
+    normalized.find(
+      (e) =>
+        (e.location || "").trim() &&
+        /(feldberg|straße|str\.|münchen)/i.test(e.location)
+    )?.location.trim() || "";
 
-  const teamUrl = u.toString();
-  const parsed = parseAllFromHtml(combinedHtml, teamUrl);
+  const parsed = normalized.map((e) => fillMissingLocation(e, inferredHomeLocation));
+
+  parsed.sort((a, b) => (a.start > b.start ? 1 : a.start < b.start ? -1 : 0));
 
   if (debug) {
     return NextResponse.json({
-      baseHtmlLen: text.length,
-      partialLen,
-      combinedHtmlLen: combinedHtml.length,
-      hasMoreUrl: Boolean(moreUrl),
-      moreUrlAuto,
-      matches: parsed.matches,
-      hasUhr: parsed.hasUhr,
-      skippedSeasonHistory: parsed.skippedSeasonHistory,
-      skippedDupes: parsed.skippedDupes,
-      skippedAbgesetzt: parsed.skippedAbgesetzt,
-      events: parsed.events.length,
-      teamKey: parsed.teamKey,
-      firstFive: parsed.events.slice(0, 5).map((e) => ({
+      sourceUrl: u.toString(),
+      fetchedLen: text.length,
+      unfoldedLen: normalizeAndUnfoldIcs(text).length,
+      hasDtstart: /\nDTSTART/i.test(normalizeAndUnfoldIcs(text)),
+      hasDtend: /\nDTEND/i.test(normalizeAndUnfoldIcs(text)),
+      events: parsed.length,
+      firstFive: parsed.slice(0, 5).map((e) => ({
+        start: e.start,
         summary: e.summary,
         location: e.location,
+        status: e.status,
       })),
     });
   }
 
-  const ics = buildIcs(parsed.events);
+  const ics = buildIcs(parsed);
 
   return new NextResponse(ics, {
     status: 200,
     headers: {
       "content-type": "text/calendar; charset=utf-8",
       "cache-control": "no-store",
+      "content-disposition": 'attachment; filename="bfv.ics"',
     },
   });
 }
