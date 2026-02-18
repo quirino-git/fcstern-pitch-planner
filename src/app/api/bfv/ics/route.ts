@@ -9,7 +9,7 @@ const HOME_FALLBACK_LOCATION =
   "BSA Feldbergstraße, Feldbergstr. 65, 81825 München";
 
 /* =========================
-   Basic helpers
+   Security / fetch helpers
 ========================= */
 
 function isAllowedHost(host: string) {
@@ -26,6 +26,25 @@ function isAllowedHost(host: string) {
 function looksLikeIcs(text: string) {
   return /BEGIN:VCALENDAR/i.test(text);
 }
+
+async function fetchText(url: string) {
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      "accept-language": "de-DE,de;q=0.9,en;q=0.8",
+      accept: "text/html,*/*",
+    },
+    cache: "no-store",
+    redirect: "follow",
+  });
+
+  const text = await res.text().catch(() => "");
+  return { ok: res.ok, status: res.status, text };
+}
+
+/* =========================
+   Small utils
+========================= */
 
 function pad(n: number) {
   return String(n).padStart(2, "0");
@@ -55,106 +74,9 @@ function escapeIcsValue(s: string) {
     .replace(/,/g, "\\,");
 }
 
-// Für eure App: nicht falten (kein Zeilenumbruch)
+// For your GUI: do NOT fold lines (some parsers/UI get weird)
 function foldLine(line: string) {
   return [line];
-}
-
-async function fetchText(url: string) {
-  const res = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      "accept-language": "de-DE,de;q=0.9,en;q=0.8",
-      accept: "text/html,*/*",
-    },
-    cache: "no-store",
-    redirect: "follow",
-  });
-
-  const text = await res.text().catch(() => "");
-  return { ok: res.ok, status: res.status, text };
-}
-
-/* =========================
-   Cleaning helpers
-========================= */
-
-function cleanText(s: string) {
-  let t = s || "";
-
-  // remove script/style blocks
-  t = t.replace(/<script[\s\S]*?<\/script>/gi, " ");
-  t = t.replace(/<style[\s\S]*?<\/style>/gi, " ");
-
-  // remove common media tags
-  t = t.replace(/<img[^>]*>/gi, " ");
-  t = t.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
-
-  // remove ALL tags (incl. custom elements)
-  t = t.replace(/<[^>]*>/g, " ");
-
-  // decode a few entities
-  t = t.replace(/&nbsp;|&#160;/gi, " ");
-  t = t.replace(/\u00a0/g, " ");
-
-  // If BFV markup got "flattened" (tags stripped upstream), we can end up with
-  // chunks like: "data-img-title= FC Stern ... data-module= BfvImage loading= lazy / FC Stern ..."
-  // We want to KEEP the visible team name after the slash, but DROP the attribute chunk before it.
-  // Remove any "data-img-title= ... /" attribute blocks (non-greedy up to the next slash).
-  t = t.replace(/\bdata-img-title\s*=\s*.*?\s*\/\s*/gi, "");
-
-  // Also drop other common flattened attributes that may appear without angle brackets.
-  t = t.replace(/\bdata-[a-z0-9_-]+\s*=\s*[^|/]{0,80}/gi, " ");
-  t = t.replace(/\b(?:data-module|loading|srcset|sizes|alt|title|aria-[a-z0-9_-]+)\s*=\s*[^|/]{0,80}/gi, " ");
-  t = t.replace(/\bBfvImage\b/gi, " ");
-  t = t.replace(/\blazy\b/gi, " ");
-
-  // remove leftover angle/quote chars if any remain
-  t = t.replace(/[<>\"]/g, " ");
-
-  // normalize roman suffix spacing in team labels (U9- I => U9-I)
-  t = t.replace(/\b(U\d{1,2}|U\d{1,2}\s*\(.*?\))\s*-\s*([IVX]{1,4})\b/g, "$1-$2");
-  t = t.replace(/\b([A-Za-zÄÖÜäöüß]{2,})\s*-\s*([IVX]{1,4})\b/g, "$1-$2");
-
-  // collapse whitespace
-  t = t.replace(/\s+/g, " ").trim();
-
-  return t;
-}
-
-function cleanBfvSummary(s: string) {
-  let t = cleanText(s)
-    .replace(/\s+/g, " ")
-    .replace(/^['| -]+/g, "")
-    .replace(/['| -]+$/g, "")
-    .trim();
-
-  // Remove leading date/time fragments that can slip into the extracted window
-  // e.g. "22.02.2026 /10:00 Uhr ..." or ".2026 /10:00 Uhr ..."
-  t = t.replace(/^\d{2}\.\d{2}\.\d{4}\s*(?:\/\s*)?\d{1,2}[:.]\d{2}(?:\s*Uhr)?\s*/i, "");
-  t = t.replace(/^\.?\d{4}\s*(?:\/\s*)?\d{1,2}[:.]\d{2}(?:\s*Uhr)?\s*/i, "");
-
-  // remove some remaining BFV tokens that can still slip through
-  t = t.replace(/\bdata-module\b/gi, "");
-  t = t.replace(/\bdata-img-title\b/gi, "");
-  // Remove lone roman markers (table/column artifacts) but keep team suffixes like U9-I
-  t = t.replace(/\b(?<!U\d{1,2}-)(?:I|II|III|IV|V|VI|VII|VIII|IX|X)\b/gi, " ");
-  t = t.replace(/\s+/g, " ").trim();
-
-  // BFV sometimes inserts ' - : - ' as separator; normalize
-  t = t.replace(/\s*-\s*:\s*-\s*/g, " - ");
-  // Drop any leftover 'Uhr' tokens or leading separators
-  t = t.replace(/\bUhr\b/gi, " ");
-  t = t.replace(/^\s*[\/\-|]+\s*/g, "");
-
-  // Cleanup repeated separators
-  // Remove slashes/pipes that BFV uses for layout (we already have separate date/time columns)
-  t = t.replace(/[|]/g, " ");
-  t = t.replace(/\s*\/\s*/g, " ");
-  t = t.replace(/\s*-\s*/g, " - ");
-  t = t.replace(/\s{2,}/g, " ").trim();
-
-  return t;
 }
 
 function uidFrom(summary: string, start: Date) {
@@ -163,7 +85,57 @@ function uidFrom(summary: string, start: Date) {
 }
 
 /* =========================
-   Auto-moreUrl
+   Text cleaning
+========================= */
+
+function cleanText(s: string) {
+  let t = s || "";
+
+  // Remove scripts/styles
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, " ");
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, " ");
+
+  // Remove svg blocks
+  t = t.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
+
+  // Convert tags to spaces
+  t = t.replace(/<[^>]*>/g, " ");
+
+  // HTML entities & nbsp
+  t = t.replace(/&nbsp;|&#160;/gi, " ");
+  t = t.replace(/\u00a0/g, " ");
+
+  // Collapse spaces
+  t = t.replace(/\s+/g, " ").trim();
+
+  return t;
+}
+
+function cleanBfvSummary(s: string) {
+  let t = cleanText(s);
+
+  // Kill BFV image-component attribute garbage that sometimes leaks into text windows
+  t = t.replace(/\bdata-[a-z0-9_-]+\s*=\s*[^\s]+\b/gi, " ");
+  t = t.replace(/\bloading\s*=\s*[^\s]+\b/gi, " ");
+  t = t.replace(/\bdata-module\s*=\s*[^\s]+\b/gi, " ");
+  t = t.replace(/\bBfvImage\b/gi, " ");
+
+  // Remove stray pipes/slashes that appear from layout
+  t = t.replace(/[|]/g, " ");
+  t = t.replace(/\s+\/\s+/g, " - ");
+  t = t.replace(/\s+/g, " ").trim();
+
+  // Normalize dash variants a bit
+  t = t.replace(/[–—]/g, "-").replace(/\s*-\s*/g, " - ").replace(/\s+/g, " ").trim();
+
+  // Trim leading junk
+  t = t.replace(/^[-\s:]+/g, "").trim();
+
+  return t;
+}
+
+/* =========================
+   Auto "Mehr anzeigen" / partial loader
 ========================= */
 
 function extractTeamIdFromBfvTeamUrl(teamUrl: string): string | "" {
@@ -175,70 +147,97 @@ function buildDefaultMoreUrl(teamId: string) {
   return `https://www.bfv.de/partial/mannschaftsprofil/spielplan/${teamId}/naechste?wettbewerbsart=1&spieltyp=ALLE&from=0&size=5`;
 }
 
+function setFrom(url: string, from: number) {
+  const u = new URL(url);
+  u.searchParams.set("from", String(from));
+  return u.toString();
+}
+
+async function loadBfvPartialSpielplanAll(moreUrl: string, maxPages = 12) {
+  const u0 = new URL(moreUrl);
+  const size = Number(u0.searchParams.get("size") || "5") || 5;
+
+  const parts: string[] = [];
+  const seenHashes = new Set<string>();
+
+  for (let page = 0; page < maxPages; page++) {
+    const from = page * size;
+    const url = setFrom(moreUrl, from);
+
+    const { ok, text } = await fetchText(url);
+    if (!ok || !text || text.length < 50) break;
+
+    const h = crypto.createHash("sha1").update(text).digest("hex");
+    if (seenHashes.has(h)) break;
+    seenHashes.add(h);
+
+    parts.push(text);
+  }
+
+  return parts.join("\n");
+}
+
 /* =========================
-   Location logic
+   Robust team matching (fixes FC Stern issues)
+========================= */
+
+function normalizeText(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/ß/g, "ss")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function teamKeyFromTeamUrl(teamUrl: string) {
+  let slug = "";
+  try {
+    const u = new URL(teamUrl);
+    const segs = u.pathname.split("/").filter(Boolean);
+    const i = segs.findIndex((p) => p === "mannschaften");
+    if (i >= 0) slug = segs[i + 1] || "";
+  } catch {
+    // ignore
+  }
+
+  // Remove trailing roman suffix in slug (…-u9-i, …-u8-ii, …-u9-1 etc.)
+  slug = slug.replace(/-(i|ii|iii|iv|v|vi|vii|viii|ix|x)$/i, "");
+
+  return normalizeText(slug);
+}
+
+function tokensFromTeamKey(teamKey: string) {
+  const stop = new Set(["fc", "sv", "tsv", "sc", "spvgg", "sg", "dj", "u"]);
+  const toks = normalizeText(teamKey)
+    .split(" ")
+    .filter(Boolean)
+    .filter((t) => t.length >= 2 && !stop.has(t));
+
+  // Prefer club + uXX if present
+  return toks;
+}
+
+function containsEnoughTokens(text: string, teamKey: string) {
+  const t = normalizeText(text);
+  const toks = tokensFromTeamKey(teamKey);
+
+  if (toks.length === 0) return false;
+
+  const hits = toks.filter((tok) => t.includes(tok));
+  // Require at least 2 hits (or all if only 1 token)
+  const need = toks.length === 1 ? 1 : 2;
+  return hits.length >= need;
+}
+
+/* =========================
+   Location extraction
 ========================= */
 
 function normalizeSpaces(s: string) {
   return (s || "").replace(/\s+/g, " ").trim();
-}
-
-function isFestival(summary: string) {
-  return /kinderfestival/i.test(summary);
-}
-
-function stripDiacritics(input: string) {
-  // NFD splits accents into separate code points; then we drop the marks
-  return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
-
-function normalizeTeamName(input: string) {
-  let t = stripDiacritics(input || "").toLowerCase();
-  // unify separators
-  t = t.replace(/[\u2010-\u2015]/g, "-");
-  // "U8-I" and "U8 - I" should match
-  t = t.replace(/\bu(\d{1,2})\s*[- ]\s*i\b/g, "u$1 i");
-  t = t.replace(/\bu(\d{1,2})\s*[- ]\s*ii\b/g, "u$1 ii");
-  t = t.replace(/\bu(\d{1,2})\s*[- ]\s*iii\b/g, "u$1 iii");
-  // keep letters/numbers, turn everything else into spaces
-  t = t.replace(/[^a-z0-9]+/g, " ");
-  t = t.replace(/\s+/g, " ").trim();
-  return t;
-}
-
-function teamNameFromBfvTeamUrl(teamUrl: string): string {
-  try {
-    const u = new URL(teamUrl);
-    const parts = u.pathname.split("/").filter(Boolean);
-    // .../mannschaften/<slug>/<id>
-    const idx = parts.findIndex((p) => p === "mannschaften");
-    const slug = idx >= 0 ? parts[idx + 1] : parts[parts.length - 2];
-    if (!slug) return "";
-    return slug.replace(/-/g, " ");
-  } catch {
-    // url might already be decoded or without protocol
-    const m = teamUrl.match(/\/mannschaften\/([^\/]+)\//);
-    return m ? m[1].replace(/-/g, " ") : "";
-  }
-}
-
-function isHomeGame(summary: string, teamHint: string) {
-  const parts = summary.split(" - ");
-  if (parts.length < 2) return false;
-
-  const host = parts[0];
-  const hostN = normalizeTeamName(host);
-  const teamN = normalizeTeamName(teamHint);
-
-  if (!teamN) return false;
-  // allow partial matches because BFV sometimes expands/shortens names
-  return (
-    hostN === teamN ||
-    hostN.startsWith(teamN) ||
-    teamN.startsWith(hostN) ||
-    hostN.includes(teamN) ||
-    teamN.includes(hostN)
-  );
 }
 
 function looksLikeAddress(text: string) {
@@ -272,7 +271,36 @@ function extractLocationFromTextWindow(textWindow: string): string {
 }
 
 /* =========================
-   Parse
+   Home/Away extraction
+========================= */
+
+function isFestival(summaryClean: string) {
+  return /kinderfestival/i.test(summaryClean);
+}
+
+function extractHostTeam(summaryClean: string) {
+  const s = summaryClean.replace(/[–—]/g, "-");
+
+  // Kinderfestival: keep "U8 - I" intact by cutting at " - Kinderfestival"
+  const mf = s.match(/^(.*?)\s*-\s*kinderfestival\b/i);
+  if (mf && mf[1]) return mf[1].trim();
+
+  // Normal matches often contain " - : - " as delimiter between home/away
+  const mm = s.match(/^(.*?)\s*-\s*:\s*-\s*(.*)$/);
+  if (mm && mm[1]) return mm[1].trim();
+
+  // Fallback: first chunk
+  const parts = s.split(" - ");
+  return (parts[0] || s).trim();
+}
+
+function isHomeGame(summaryClean: string, teamKey: string) {
+  const host = extractHostTeam(summaryClean);
+  return containsEnoughTokens(host, teamKey);
+}
+
+/* =========================
+   Parsing
 ========================= */
 
 type ParsedEvent = {
@@ -284,9 +312,10 @@ type ParsedEvent = {
 };
 
 function parseAllFromHtml(html: string, teamUrl: string) {
-  const teamHint = teamNameFromBfvTeamUrl(teamUrl);
   const events: ParsedEvent[] = [];
   const seen = new Set<string>();
+
+  const teamKey = teamKeyFromTeamUrl(teamUrl);
 
   const re =
     /(\d{2})\.(\d{2})\.(\d{4})[^0-9]{0,120}(\d{1,2})[:.](\d{2})(?:\s*Uhr)?/gi;
@@ -295,6 +324,7 @@ function parseAllFromHtml(html: string, teamUrl: string) {
   let matches = 0;
   let skippedSeasonHistory = 0;
   let skippedDupes = 0;
+  let skippedAbgesetzt = 0;
 
   while ((m = re.exec(html)) !== null) {
     matches++;
@@ -315,21 +345,27 @@ function parseAllFromHtml(html: string, teamUrl: string) {
       .replace(/Zum Spiel.*$/i, "")
       .trim();
 
-    let summary = cleanBfvSummary(afterTime);
-    if (!summary) {
-      summary = cleanBfvSummary(textWindow.slice(0, 220));
-      if (!summary) continue;
+    let summaryRaw = cleanBfvSummary(afterTime);
+    if (!summaryRaw) {
+      summaryRaw = cleanBfvSummary(textWindow.slice(0, 240));
+      if (!summaryRaw) continue;
     }
 
-    const sumLower = summary.toLowerCase();
+    const sumLower = summaryRaw.toLowerCase();
 
-    // saison/historie raus (keine echten Spiele)
+    // Skip season/history blocks
     if (sumLower.includes("historie") || sumLower.includes("saison")) {
       skippedSeasonHistory++;
       continue;
     }
 
-    const uid = uidFrom(summary, start);
+    // Optional: skip abgesetzt (you said it's fine to keep, but it helps)
+    if (sumLower.includes("abgesetzt")) {
+      skippedAbgesetzt++;
+      continue;
+    }
+
+    const uid = uidFrom(summaryRaw, start);
     if (seen.has(uid)) {
       skippedDupes++;
       continue;
@@ -338,9 +374,12 @@ function parseAllFromHtml(html: string, teamUrl: string) {
 
     const end = addMinutes(start, 90);
 
-    const summaryClean = cleanBfvSummary(summary);
-    const home = isHomeGame(summaryClean, teamHint);
-    const festival = isFestival(summaryClean);
+    const summary = summaryRaw;
+
+    const festival = isFestival(summary);
+    void festival; // for future use
+
+    const home = isHomeGame(summary, teamKey);
 
     let location = extractLocationFromTextWindow(textWindow);
 
@@ -349,10 +388,7 @@ function parseAllFromHtml(html: string, teamUrl: string) {
       else location = "Auswärts";
     }
 
-    // aktuell kein Festival-Filter, nur Markierung möglich
-    void festival;
-
-    events.push({ uid, start, end, summary: summaryClean, location });
+    events.push({ uid, start, end, summary, location });
   }
 
   events.sort((a, b) => a.start.getTime() - b.start.getTime());
@@ -363,52 +399,20 @@ function parseAllFromHtml(html: string, teamUrl: string) {
     hasUhr: /Uhr/i.test(html),
     skippedSeasonHistory,
     skippedDupes,
+    skippedAbgesetzt,
+    teamKey,
   };
 }
 
 /* =========================
-   “Mehr anzeigen” loader
-========================= */
-
-function setFrom(url: string, from: number) {
-  const u = new URL(url);
-  u.searchParams.set("from", String(from));
-  return u.toString();
-}
-
-async function loadBfvPartialSpielplanAll(moreUrl: string, maxPages = 12) {
-  const u0 = new URL(moreUrl);
-  const size = Number(u0.searchParams.get("size") || "5") || 5;
-
-  const parts: string[] = [];
-  const seenHashes = new Set<string>();
-
-  for (let page = 0; page < maxPages; page++) {
-    const from = page * size;
-    const url = setFrom(moreUrl, from);
-
-    const { ok, text } = await fetchText(url);
-    if (!ok || !text || text.length < 50) break;
-
-    const h = crypto.createHash("sha1").update(text).digest("hex");
-    if (seenHashes.has(h)) break;
-    seenHashes.add(h);
-
-    parts.push(text);
-  }
-
-  return parts.join("\n");
-}
-
-/* =========================
-   ICS build
+   ICS builder
 ========================= */
 
 function buildIcs(events: ParsedEvent[]) {
   const lines: string[] = [];
   lines.push("BEGIN:VCALENDAR");
   lines.push("VERSION:2.0");
-  lines.push("PRODID:-//FCSternPitchPlanner//BFV HTML to ICS (AUTO_MORE+CLEAN)//DE");
+  lines.push("PRODID:-//FCSternPitchPlanner//BFV HTML to ICS (ROBUST_HOME)//DE");
   lines.push("CALSCALE:GREGORIAN");
 
   const dtstamp = formatIcsLocal(new Date());
@@ -464,7 +468,7 @@ export async function GET(req: Request) {
     );
   }
 
-  // Passthrough für echte ICS Links
+  // Passthrough for real ICS
   if (looksLikeIcs(text)) {
     return new NextResponse(text, {
       status: 200,
@@ -475,7 +479,7 @@ export async function GET(req: Request) {
     });
   }
 
-  // Auto-moreUrl (wenn UI es nicht mitschickt)
+  // Auto moreUrl
   let moreUrl = moreUrlParam;
   let moreUrlAuto = false;
 
@@ -503,7 +507,8 @@ export async function GET(req: Request) {
     }
   }
 
-  const parsed = parseAllFromHtml(combinedHtml, u.toString());
+  const teamUrl = u.toString();
+  const parsed = parseAllFromHtml(combinedHtml, teamUrl);
 
   if (debug) {
     return NextResponse.json({
@@ -516,7 +521,9 @@ export async function GET(req: Request) {
       hasUhr: parsed.hasUhr,
       skippedSeasonHistory: parsed.skippedSeasonHistory,
       skippedDupes: parsed.skippedDupes,
+      skippedAbgesetzt: parsed.skippedAbgesetzt,
       events: parsed.events.length,
+      teamKey: parsed.teamKey,
       firstFive: parsed.events.slice(0, 5).map((e) => ({
         summary: e.summary,
         location: e.location,
