@@ -11,7 +11,13 @@ type Profile = {
   active: boolean | null;
 };
 
-type Pitch = { id: string; name: string; type: "GROSSFELD" | "KOMPAKT" };
+type Pitch = {
+  id: string;
+  name: string;
+  type: "GROSSFELD" | "KOMPAKT";
+  // optional: some queries fetch this from DB
+  capacity_units?: number | null;
+};
 type Team = { id: string; name: string; age_u: number };
 
 type BfvClub = { id: string; name: string };
@@ -24,6 +30,8 @@ type BfvTeam = {
   home_only: boolean | null;
 };
 
+type BookingTeam = { age_u: number | null; name?: string | null };
+
 type Booking = {
   id: string;
   start_at: string;
@@ -33,6 +41,10 @@ type Booking = {
   team_id: string;
   pitch_id: string;
   created_by?: string | null;
+  // joined from teams via FK (optional, depending on select)
+  // Supabase relations can come back as object OR array depending on how the
+  // relationship is defined in PostgREST. We support both.
+  team?: BookingTeam | BookingTeam[] | null;
 };
 
 type IcsGame = {
@@ -50,14 +62,29 @@ type GameRow = IcsGame & {
   bfvClubId: string;
   bfvClubName: string;
   bfvAgeU: number | null;
+  bfvAgeSource: "teams" | "bfv_teams" | "none";
   icsUrl: string;
 };
 
 const FORCE_PREFIX = "FORCE:";
 const SEP_VALUE = "__SEP__";
 
+function bookingTeamAgeU(b: Booking): number | null {
+  const t = (b as any).team as Booking["team"];
+  const obj = Array.isArray(t) ? t[0] : t;
+  return obj && typeof (obj as any).age_u === "number" ? (obj as any).age_u : null;
+}
+
 function pad(n: number) {
   return String(n).padStart(2, "0");
+}
+
+// Supabase returns timestamptz fields as ISO strings by default.
+// For date arithmetic/comparisons we convert them to Date objects.
+function toDate(iso: string): Date {
+  // Be tolerant if we ever get a non-string at runtime.
+  const s = typeof iso === "string" ? iso : String(iso);
+  return new Date(s);
 }
 function toYMDLocal(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -68,6 +95,21 @@ function fmtDateDE(d: Date) {
 function fmtTimeDE(d: Date) {
   return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
+
+
+function normalizeTeamName(name: string) {
+  return (name || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\./g, "")
+    .replace(/\s*-\s*/g, "-")
+    .trim();
+}
+
+function toULabel(ageU: number | null | undefined): number | null {
+  return typeof ageU === "number" ? ageU + 1 : null;
+}
+
 
 function unfoldIcsLines(raw: string) {
   const lines = raw.replace(/\r\n/g, "\n").split("\n");
@@ -256,6 +298,47 @@ export default function BfvPage() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
 
+  // Altersquelle (nur eine nutzen, um Logik stabil zu halten)
+  // Default: "teams" (dort ist age_u laut dir vollständig gepflegt)
+  const AGE_SOURCE: "teams" | "bfv_teams" =
+    process.env.NEXT_PUBLIC_AGE_SOURCE === "bfv_teams" ? "bfv_teams" : "teams";
+
+  const ageMapTeams = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const t of teams) {
+      m.set(normalizeTeamName(t.name), typeof t.age_u === "number" ? t.age_u : null);
+    }
+    return m;
+  }, [teams]);
+
+  const ageMapBfv = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const t of bfvTeams) {
+      m.set(normalizeTeamName(t.name), typeof t.age_u === "number" ? t.age_u : null);
+    }
+    return m;
+  }, [bfvTeams]);
+
+  function resolveAgeU(team: BfvTeam): { ageU: number | null; source: "teams" | "bfv_teams" | "none" } {
+    const key = normalizeTeamName(team.name);
+    if (AGE_SOURCE === "teams") {
+      const v = ageMapTeams.get(key);
+      return typeof v === "number" ? { ageU: v, source: "teams" } : { ageU: null, source: "none" };
+    }
+    const v = ageMapBfv.get(key);
+    return typeof v === "number" ? { ageU: v, source: "bfv_teams" } : { ageU: null, source: "none" };
+  }
+
+  const missingAgeCount = useMemo(() => {
+    let c = 0;
+    for (const t of bfvTeams) {
+      const r = resolveAgeU(t);
+      if (r.ageU == null) c++;
+    }
+    return c;
+  }, [bfvTeams, ageMapTeams, ageMapBfv]);
+
+
   const [selectedClubId, setSelectedClubId] = useState<string>("");
   const [selectedBfvTeamId, setSelectedBfvTeamId] = useState<string>("");
 
@@ -417,7 +500,7 @@ export default function BfvPage() {
 
     const { data, error } = await supabase
       .from("bookings")
-      .select("id,start_at,end_at,status,note,team_id,pitch_id,created_by")
+      .select("id,start_at,end_at,status,note,team_id,pitch_id,created_by,team:team_id(age_u,name)")
       .gte("start_at", startISO)
       .lt("end_at", endISO);
 
@@ -470,15 +553,18 @@ export default function BfvPage() {
   }
 
   function allowedPitchesForAge(ageU: number | null) {
-    // Regel: ab U14 nur Großfeld Mitte+Rechts; U7-U13 alle
-    if (ageU != null && ageU >= 14) {
-      return pitches.filter((p) => {
-        const n = (p.name || "").toLowerCase();
-        return p.type === "GROSSFELD" && (n.includes("mitte") || n.includes("rechts"));
-      });
-    }
+    // WICHTIG: age_u ist in unserem Datenmodell um 1 verschoben (U9 -> 8).
+    // Deshalb immer mit dem "U-Label" arbeiten.
+    const uLabel = toULabel(ageU);
+
+    // Grob-Filter für die UI:
+    // - U14+ (oder unbekannt): kein Kompaktfeld
+    // - bis inkl. U13: alle Plätze anzeigen
+    //   (die Kombinations-/Exklusivregeln werden in isAvailable geprüft)
+    if (uLabel == null || uLabel >= 14) return pitches.filter((p) => p.type !== "KOMPAKT");
     return pitches;
   }
+
 
   function getAvailablePitches(game: GameRow) {
     const candidates = allowedPitchesForAge(game.bfvAgeU);
@@ -486,16 +572,74 @@ export default function BfvPage() {
     const gStart = game.start;
     const gEnd = game.end;
 
-    const blockingBookings = bookings.filter((b) => BLOCKING_STATUSES.has(String(b.status || "").toUpperCase()));
+    const gameULabel = toULabel(game.bfvAgeU);
+    const isUnknown = gameULabel == null;
+    const isU12orYounger = gameULabel != null ? gameULabel <= 12 : false;
+    const isU13 = gameULabel === 13;
+    const isU14Plus = gameULabel != null ? gameULabel >= 14 : false;
 
-    return candidates.filter((p) => {
-      const collision = blockingBookings.some((b) => {
-        if (b.pitch_id !== p.id) return false;
-        return overlaps(gStart, gEnd, new Date(b.start_at), new Date(b.end_at));
+    const blockingBookings = bookings.filter(
+      (b) =>
+        BLOCKING_STATUSES.has(String(b.status)) &&
+        toDate(b.start_at) < gEnd &&
+        toDate(b.end_at) > gStart
+    );
+
+    function bookingULabel(b: Booking): number | null {
+      return toULabel(bookingTeamAgeU(b));
+    }
+
+    function overlapsForPitch(pitchId: string) {
+      return blockingBookings.filter((b) => b.pitch_id === pitchId);
+    }
+
+    function isAvailable(p: Pitch) {
+      const ovs = overlapsForPitch(p.id);
+
+      const overlapsAnyU13Plus = ovs.some((b) => {
+        const u = bookingULabel(b);
+        return u == null ? true : u >= 13;
       });
-      return !collision;
-    });
+
+      // -----------------
+      // KOMPAKTFELD Regeln
+      // -----------------
+      if (p.type === "KOMPAKT") {
+        // U14+ oder unbekannt: darf nicht aufs Kompaktfeld (außer Force-Option im UI)
+        if (isUnknown || isU14Plus) return false;
+
+        // U13: darf Kompaktfeld, aber nur exklusiv (keine Kombination mit anderen)
+        if (isU13) return ovs.length === 0;
+
+        // <=U12: bis zu 2 parallele, aber nur mit <=U12
+        if (isU12orYounger) {
+          if (overlapsAnyU13Plus) return false; // keine Mischung <=U12 mit U13+
+          return ovs.length < 2;
+        }
+
+        return false;
+      }
+
+      // -----------------
+      // GROSSFELD / RASEN Regeln
+      // -----------------
+      // Ab U13 (inkl.) und unbekannt: exklusiv (keine weiteren überlappenden Buchungen)
+      if (isUnknown || isU13 || isU14Plus) {
+        return ovs.length === 0;
+      }
+
+      // <=U12: bis zu 2 parallele, aber nur wenn auch die Overlaps <=U12 sind
+      if (isU12orYounger) {
+        if (overlapsAnyU13Plus) return false;
+        return ovs.length < 2;
+      }
+
+      return ovs.length === 0;
+    }
+
+    return candidates.filter(isAvailable);
   }
+
 
   // ---------- Home/Away marker ----------
   function addHomeInfo(rawGames: IcsGame[], clubName: string, teamName: string) {
@@ -528,15 +672,19 @@ export default function BfvPage() {
     // Filter (nur Feldbergstraße/Heimspiele): nur g.isHome === true
     const filtered = homeOnly ? parsed.filter((g) => g.isHome === true) : parsed;
 
-    const rows: GameRow[] = filtered.map((g) => ({
-      ...g,
-      bfvTeamId: team.id,
-      bfvTeamName: team.name,
-      bfvClubId: team.club_id,
-      bfvClubName: clubName,
-      bfvAgeU: team.age_u ?? null,
-      icsUrl: url,
-    }));
+    const rows: GameRow[] = filtered.map((g) => {
+      const r = resolveAgeU(team);
+      return {
+        ...g,
+        bfvTeamId: team.id,
+        bfvTeamName: team.name,
+        bfvClubId: team.club_id,
+        bfvClubName: clubName,
+        bfvAgeU: r.ageU,
+        bfvAgeSource: r.source,
+        icsUrl: url,
+      };
+    });
 
     // Range bestimmen
     let min = rows[0]?.start;
@@ -601,15 +749,19 @@ export default function BfvPage() {
       const filteredHome = homeOnly ? parsed.filter((g) => g.isHome !== false) : parsed;
       const dayGames = filteredHome.filter((g) => toYMDLocal(g.start) === dayStr);
 
-      return dayGames.map((g) => ({
-        ...g,
-        bfvTeamId: t.id,
-        bfvTeamName: t.name,
-        bfvClubId: t.club_id,
-        bfvClubName: clubName,
-        bfvAgeU: t.age_u ?? null,
-        icsUrl: url,
-      }));
+      return dayGames.map((g) => {
+        const r = resolveAgeU(t);
+        return {
+          ...g,
+          bfvTeamId: t.id,
+          bfvTeamName: t.name,
+          bfvClubId: t.club_id,
+          bfvClubName: clubName,
+          bfvAgeU: r.ageU,
+          bfvAgeSource: r.source,
+          icsUrl: url,
+        };
+      });
     });
 
     const rows = results.flat();
@@ -891,7 +1043,7 @@ export default function BfvPage() {
               {teamsForClub.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
-                  {t.age_u ? ` (U${t.age_u})` : ""}
+                  {toULabel(t.age_u) ? ` (U${toULabel(t.age_u)})` : ""}
                 </option>
               ))}
             </select>
@@ -925,7 +1077,8 @@ export default function BfvPage() {
             {isDayPlanning ? (
               <>
                 <div style={{ fontWeight: 700, marginBottom: 4 }}>Hinweis:</div>
-                <div>Es werden alle Mannschaften mit gepflegtem ICS-Link geprüft.</div>
+                <div>Es werden alle Mannschaften mit gepflegtem ICS-Link geprüft.
+                <div style={{ marginTop: 4, opacity: 0.7 }}>Alterslogik: Anzeige-U = age_u + 1 (Quelle: Tabelle <code>teams</code>).</div></div>
               </>
             ) : singleIcsUrl ? (
               <>
@@ -989,7 +1142,7 @@ export default function BfvPage() {
                         </td>
                         <td style={{ padding: 10, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                           {g.bfvTeamName}
-                          {g.bfvAgeU ? ` (U${g.bfvAgeU})` : ""}
+                          {toULabel(g.bfvAgeU) ? ` (U${toULabel(g.bfvAgeU)})` : ""}
                         </td>
                       </>
                     )}
@@ -1193,9 +1346,15 @@ background: "rgba(40, 160, 80, 0.25)",
         </div>
 
         <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
-          Hinweis: Wenn ein Spiel kollidiert, kommt ggf. ein Overlap-Fehler. In der UI blocken nur REQUESTED/APPROVED –
-          wenn deine DB-Exclusion-Constraint aber noch REJECTED/CANCELLED blockt, musst du die Constraint in Supabase
-          entsprechend anpassen.
+          <div>
+            Hinweis: Wenn ein Spiel kollidiert, kommt ggf. ein Overlap-Fehler. In der UI gilt:
+            <b> U12 oder jünger</b> = bis zu <b>2</b> parallele Buchungen (nur mit U12/≤), <b>U13+</b> = exklusiv (und nur
+            Großfeld). <span style={{ opacity: 0.9 }}>Altersquelle: <b>{AGE_SOURCE}</b>{missingAgeCount ? ` (fehlend bei ${missingAgeCount} BFV-Mannschaften)` : ""}</span>.
+          </div>
+          <div style={{ marginTop: 6 }}>
+            In der UI blocken nur REQUESTED/APPROVED – wenn deine DB-Exclusion-Constraint aber noch REJECTED/CANCELLED blockt,
+            musst du die Constraint in Supabase entsprechend anpassen.
+          </div>
         </div>
       </div>
     </div>
