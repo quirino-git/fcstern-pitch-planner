@@ -1,0 +1,54 @@
+@media print {
+  /* Seite */
+  @page { size: A4 landscape; margin: 8mm; }
+
+  /* Optional: UI-Elemente ausblenden (passe an deine Struktur an) */
+  header, nav, .no-print { display: none !important; }
+
+  /* Wrapper: kein horizontaler Scroll im Print */
+  .print-wrap { overflow: visible !important; }
+
+  /* Grid soll auf Druckbreite passen */
+  .print-grid {
+    width: 100% !important;
+    min-width: 0 !important;
+    gap: 6px !important;
+  }
+
+  /* Pitch-Spalten kompakter */
+  .print-pitch-col { min-width: 180px !important; }
+
+  /* Kacheln/Text kompakter */
+  .print-event { font-size: 10px !important; line-height: 1.1 !important; }
+
+  /* Farben im Druck beibehalten (wenn du farbig druckst) */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* ====== WICHTIG: pro Tag eine Seite + nicht splitten ====== */
+  .print-day {
+    break-before: page;
+    break-inside: avoid;
+    page-break-before: always;     /* Fallback */
+    page-break-inside: avoid;      /* Fallback */
+  }
+
+  /* Erste Tages-Card soll nicht mit Leer-Seite starten */
+  .print-day:first-of-type {
+    break-before: auto;
+    page-break-before: auto;
+  }
+
+  /* Header eines Tages nicht am Seitenende lassen */
+  .print-day h2,
+  .print-day .day-header {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Wenn du pro Tag eine "Card" / Container hast, nicht zerreißen */
+  .print-day .day-card,
+  .print-day .day-grid {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

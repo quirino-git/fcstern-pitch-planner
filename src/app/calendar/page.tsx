@@ -2,6 +2,10 @@
 
 import "./calendar.css";
 
+
+// All selectable statuses for the status filter UI
+const ALL_STATUSES = ["REQUESTED", "APPROVED", "REJECTED", "CANCELLED"] as const;
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 
@@ -84,13 +88,21 @@ export default function CalendarPage() {
   // View switcher (Woche/Monat/Liste)
   // -------------------------
   const calendarRef = useRef<FullCalendar | null>(null);
-  const [viewMode, setViewMode] = useState<"week" | "month" | "list">("week");
+  const [viewMode, setViewMode] = useState<"week" | "month" | "list" | "dashboard">("week");
 
   // List view range (von/bis, inkl. Tage)
-  const [listFrom, setListFrom] = useState<string>("");
-  const [listTo, setListTo] = useState<string>("");
-
-  function hideTip() {
+  const [listFrom, setListFrom] = useState<string>(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().slice(0, 10);
+  });
+const [listTo, setListTo] = useState<string>(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.toISOString().slice(0, 10);
+  });
+function hideTip() {
     setTip((t) => ({ ...t, show: false }));
   }
 
@@ -283,6 +295,46 @@ export default function CalendarPage() {
   const LIST_END_HOUR = 22;
   const SLOT_MIN = 30;
 
+
+// Overlap-Layout: doppelte Buchungen nebeneinander darstellen (pro Platz / Tag)
+type OverlapBox = { id: string; start: Date; end: Date };
+type OverlapPos = { colIndex: number; colCount: number };
+
+function boxesOverlap(a: OverlapBox, b: OverlapBox) {
+  return a.start < b.end && a.end > b.start;
+}
+
+function computeOverlapLayout(boxes: OverlapBox[]): Map<string, OverlapPos> {
+  // Greedy column assignment (ähnlich Kalender)
+  const sorted = [...boxes].sort((a, b) => a.start.getTime() - b.start.getTime());
+  const colsEnd: Date[] = []; // Endzeit pro Spalte
+  const colIndexById = new Map<string, number>();
+
+  for (const ev of sorted) {
+    let col = 0;
+    for (; col < colsEnd.length; col++) {
+      if (ev.start >= colsEnd[col]) break; // Spalte frei
+    }
+    if (col === colsEnd.length) colsEnd.push(ev.end);
+    else colsEnd[col] = ev.end;
+    colIndexById.set(ev.id, col);
+  }
+
+  // Für jedes Event: maximale Spaltenanzahl seiner Overlap-Gruppe bestimmen
+  const out = new Map<string, OverlapPos>();
+  for (const a of sorted) {
+    let maxCol = colIndexById.get(a.id) ?? 0;
+    for (const b of sorted) {
+      if (a.id === b.id) continue;
+      if (boxesOverlap(a, b)) {
+        maxCol = Math.max(maxCol, colIndexById.get(b.id) ?? 0);
+      }
+    }
+    out.set(a.id, { colIndex: colIndexById.get(a.id) ?? 0, colCount: maxCol + 1 });
+  }
+  return out;
+}
+
   function parseDateInput(value: string) {
     if (!value) return null; // YYYY-MM-DD
     const [y, m, d] = value.split("-").map((x) => parseInt(x, 10));
@@ -376,15 +428,337 @@ export default function CalendarPage() {
     window.location.href = `/request/new?${params.toString()}`;
   }
 
-  const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "ADMIN", [profile]);
+  
+// -------------------------
+// Dashboard (Cards per pitch)
+// -------------------------
+// -------------------------
+// Dashboard (Cards per pitch) + Drag & Drop
+// -------------------------
+function PitchDashboardView({
+  pitches,
+  bookings,
+}: {
+  pitches: { id: string; name: string }[];
+  bookings: any[];
+}) {
+  const norm = (d: any) => (d instanceof Date ? d : new Date(String(d)));
+
+  // Store pitch order locally so you can rearrange tiles
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem("fcstern_pitch_order") : null;
+      const arr = raw ? (JSON.parse(raw) as unknown) : null;
+      return Array.isArray(arr) ? arr.map(String) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Keep order in sync when pitches change
+  useEffect(() => {
+    const ids = pitches.map((p) => String(p.id));
+    setOrder((prev) => {
+      const kept = prev.filter((id) => ids.includes(id));
+      const missing = ids.filter((id) => !kept.includes(id));
+      const next = [...kept, ...missing];
+      try {
+        window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, [pitches]);
+
+  const sortedPitches = useMemo(() => {
+    if (!order.length) return pitches;
+    const map = new Map(pitches.map((p) => [String(p.id), p]));
+    const out: { id: string; name: string }[] = [];
+    for (const id of order) {
+      const p = map.get(String(id));
+      if (p) out.push(p);
+    }
+    // fallback in case something was missing
+    for (const p of pitches) if (!out.some((x) => String(x.id) === String(p.id))) out.push(p);
+    return out;
+  }, [pitches, order]);
+
+  const byPitch = useMemo(() => {
+    const m = new Map<string, any[]>();
+    for (const b of bookings || []) {
+      const pid = String(b.pitch_id ?? "");
+      if (!pid) continue;
+      if (!m.has(pid)) m.set(pid, []);
+      m.get(pid)!.push(b);
+    }
+    for (const arr of m.values()) {
+      arr.sort((a, b) => norm(a.start_at).getTime() - norm(b.start_at).getTime());
+    }
+    return m;
+  }, [bookings]);
+
+  const teamName = (b: any) => {
+    const cleanup = (s: string) =>
+      s
+        .replace(/\\,/g, ",")
+        .replace(/\[(?:BFV_[^\]]+|BFVTEAM_ID:[^\]]+)\]/gi, "")
+        .replace(/\bBFV_UID:[^\s,\]]+/gi, "")
+        .replace(/\bBFVTEAM_ID:[^\s,\]]+/gi, "")
+        .replace(/\\n/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const takeBeforeRealComma = (raw: string) => {
+      const placeholder = "__ESC_COMMA__";
+      const tmp = raw.replace(/\\,/g, placeholder);
+      return (tmp.split(",")[0] || "").replace(new RegExp(placeholder, "g"), ",");
+    };
+
+    const normalizeLabel = (raw: string) => {
+      let label = cleanup(takeBeforeRealComma(raw));
+      if (!label.includes(" – ")) label = label.replace(/\s-\s/, " – ");
+      return label;
+    };
+
+    const note = typeof b?.note === "string" ? b.note.trim() : "";
+    if (note) {
+      const label = normalizeLabel(note);
+      if (label) return label;
+    }
+
+    const tt = typeof b?.tooltipText === "string" ? b.tooltipText.trim() : "";
+    if (tt) {
+      const firstLine = tt.split(/\r?\n/)[0] || "";
+      const label = normalizeLabel(firstLine);
+      if (label) return label;
+    }
+
+    const tn = typeof b?.teams?.name === "string" ? b.teams.name.trim() : "";
+    return tn || "—";
+  };
+
+  const timeRange = (b: any) => {
+    const s = norm(b.start_at);
+    const e = norm(b.end_at);
+    return (
+      s.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
+      "–" +
+      e.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    );
+  };
+
+  const now = new Date();
+
+  const onDragStart = (e: React.DragEvent, id: string) => {
+    e.dataTransfer.setData("text/plain", id);
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const onDrop = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    const draggedId = e.dataTransfer.getData("text/plain");
+    if (!draggedId || draggedId === targetId) return;
+
+    setOrder((prev) => {
+      const next = prev.length ? [...prev] : pitches.map((p) => String(p.id));
+      const from = next.indexOf(String(draggedId));
+      const to = next.indexOf(String(targetId));
+      if (from === -1 || to === -1) return prev;
+
+      next.splice(from, 1);
+      next.splice(to, 0, String(draggedId));
+
+      try {
+        window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const onDragOver = (e: React.DragEvent) => e.preventDefault();
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: 12,
+        gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+        alignItems: "start",
+      }}
+    >
+      {sortedPitches.map((p) => {
+        const items = byPitch.get(String(p.id)) ?? [];
+        const next = items.find((x) => norm(x.end_at) > now) ?? null;
+
+        return (
+          <div
+            key={p.id}
+            className="card"
+            style={{ padding: 12, cursor: "grab" }}
+            draggable
+            onDragStart={(e) => onDragStart(e, String(p.id))}
+            onDragOver={onDragOver}
+            onDrop={(e) => onDrop(e, String(p.id))}
+            title="Zum Umsortieren ziehen"
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</div>
+              <div style={{ opacity: 0.35, fontSize: 10 }}>
+                {items.length} Buchung{items.length === 1 ? "" : "en"}
+              </div>
+            </div>
+
+            {next && (
+              <div
+                style={{
+                  marginTop: 10,
+                  position: "relative",
+                  padding: 16,
+                  border: "1px solid rgba(16,185,129,0.25)",
+                  borderRadius: 12,
+                  background: "rgba(16,185,129,0.10)",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    top: -15,
+                    right: 10,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    padding: "2px 8px",
+                    borderRadius: 999,
+                    background: "rgba(16,185,129,0.18)",
+                    border: "1px solid rgba(16,185,129,0.35)",
+                    lineHeight: 1.2,
+                  }}
+                >
+                  Als Nächstes
+                </span>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    fontSize: 14,
+                    lineHeight: 1.2,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "horizontal",
+                  }}
+                >
+                  {teamName(next)}
+                </div>
+                <div style={{ opacity: 0.92, marginTop: 4, fontSize: 13, fontWeight: 800 }}>
+                  {timeRange(next)}
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+              {items.slice(0, 10).map((b) => {
+                const start = norm(b.start_at);
+                const end = norm(b.end_at);
+                const isNow = start <= now && end > now;
+
+                return (
+                  <div
+                    key={b.id}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      padding: 16,
+                      border: "1px solid rgba(16,185,129,0.25)",
+                      borderRadius: 12,
+                      background: "rgba(16,185,129,0.10)",
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <div style={{ fontWeight: 600, fontSize: 14, lineHeight: 1.2, minWidth: 0, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "horizontal" }}>
+                          {teamName(b)}
+                        </div>
+                        {isNow && (
+                          <span
+                            style={{
+                              fontSize: 11,
+                              padding: "2px 8px",
+                              borderRadius: 999,
+                              background: "rgba(59,130,246,0.18)",
+                              border: "1px solid rgba(59,130,246,0.35)",
+                            }}
+                          >
+                            läuft
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ opacity: 0.92, fontSize: 13, fontWeight: 800, marginTop: 4 }}>
+                        {timeRange(b)}
+                        
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {items.length === 0 && (
+                <div style={{ opacity: 0.65, fontSize: 13, padding: "10px 0" }}>Keine Buchungen im Zeitraum.</div>
+              )}
+
+              {items.length > 10 && <div style={{ opacity: 0.7, fontSize: 12 }}>+{items.length - 10} weitere…</div>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "ADMIN", [profile]);
 
   if (!sessionChecked) return null;
 
   return (
-    <div style={{ maxWidth: 1200, margin: "24px auto", padding: 16 }}>
+    <div style={{ maxWidth: viewMode === "list" || viewMode === "dashboard" ? "none" : 1200, width: "100%", margin: "24px auto", padding: 16 }}>
+      <style jsx global>{`
+        @media print {
+          @page { size: A4 landscape; margin: 8mm; }
+
+          html, body { background: #fff !important; }
+          body { color: #111 !important; }
+
+          .no-print { display: none !important; }
+          .print-wrap { overflow: visible !important; }
+
+          .print-grid {
+            width: 100% !important;
+            min-width: 0 !important;
+            gap: 6px !important;
+          }
+
+          .print-event { font-size: 10px !important; line-height: 1.1 !important; }
+          * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+          .print-day {
+            break-before: page;
+            break-inside: avoid;
+            page-break-before: always;
+            page-break-inside: avoid;
+          }
+          .print-day:first-of-type {
+            break-before: auto;
+            page-break-before: auto;
+          }
+          .print-day .day-header {
+            break-after: avoid;
+            page-break-after: avoid;
+          }
+        }
+      `}</style>
+
       {/* Header */}
       <div
-        className="card"
+        className="card no-print"
         style={{
           padding: 16,
           display: "flex",
@@ -460,250 +834,20 @@ export default function CalendarPage() {
         </div>
       </div>
 
-      {/* Filter */}
-      <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <div className="card" style={{ padding: 12, minWidth: 240, maxWidth: 320, position: "relative" }}>
-          <button
-            type="button"
-            onClick={() => {
-              setPitchPickerOpen((v) => !v);
-              setStatusPickerOpen(false);
-            }}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              background: "transparent",
-              border: "1px solid #273243",
-              borderRadius: 14,
-              padding: "10px 12px",
-              cursor: "pointer",
-            }}
-          >
-            <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>Plätze ({pitches.length})</span>
-              <span style={{ opacity: 0.75, fontSize: 12 }}>{pitchPickerOpen ? "▲" : "▼"}</span>
-            </div>
-            <div style={{ opacity: 0.85, marginTop: 2, fontSize: 13 }}>
-              {pitchFilterIds.length === pitches.length
-                ? "Alle"
-                : pitchFilterIds.length === 0
-                ? "Keine"
-                : `${pitchFilterIds.length} ausgewählt`}
-            </div>
-          </button>
-
-          {pitchPickerOpen && (
-            <div
-              style={{
-                position: "absolute",
-                top: "calc(100% + 8px)",
-                left: 0,
-                right: 0,
-                zIndex: 50,
-                background: "rgba(10,14,20,0.98)",
-                border: "1px solid #273243",
-                borderRadius: 16,
-                padding: 12,
-                boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-              }}
-            >
-              <div style={{ display: "flex", gap: 10, justifyContent: "space-between", marginBottom: 10 }}>
-                <button
-                  type="button"
-                  onClick={() => setPitchFilterIds(pitches.map((p) => p.id))}
-                  style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 800 }}
-                >
-                  Alle
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPitchFilterIds([])}
-                  style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 800 }}
-                >
-                  Keine
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPitchPickerOpen(false)}
-                  style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 800 }}
-                >
-                  Schließen
-                </button>
-              </div>
-
-              <div style={{ maxHeight: 240, overflow: "auto", paddingRight: 6 }}>
-                {pitches.map((p) => {
-                  const checked = pitchFilterIds.includes(p.id);
-                  return (
-                    <label
-                      key={p.id}
-                      style={{
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "center",
-                        padding: "8px 10px",
-                        borderRadius: 12,
-                        border: "1px solid rgba(255,255,255,0.08)",
-                        marginBottom: 8,
-                        cursor: "pointer",
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          setPitchFilterIds((prev) => {
-                            const next = new Set(prev);
-                            if (e.target.checked) next.add(p.id);
-                            else next.delete(p.id);
-                            return Array.from(next);
-                          });
-                        }}
-                      />
-                      <span style={{ fontWeight: 700 }}>{p.name}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="card" style={{ padding: 12, minWidth: 240, maxWidth: 320, position: "relative" }}>
-          <button
-            type="button"
-            onClick={() => {
-              setStatusPickerOpen((v) => !v);
-              setPitchPickerOpen(false);
-            }}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              background: "transparent",
-              border: "1px solid #273243",
-              borderRadius: 14,
-              padding: "10px 12px",
-              cursor: "pointer",
-            }}
-          >
-            <div style={{ fontWeight: 900, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>Status ({statusFilter.length})</span>
-              <span style={{ opacity: 0.75, fontSize: 12 }}>{statusPickerOpen ? "▲" : "▼"}</span>
-            </div>
-            <div style={{ opacity: 0.85, marginTop: 2, fontSize: 13 }}>
-              {statusFilter.length === 0
-                ? "Keine"
-                : statusFilter
-                    .map((s) =>
-                      s === "REQUESTED"
-                        ? "Angefragt"
-                        : s === "APPROVED"
-                        ? "Genehmigt"
-                        : s === "REJECTED"
-                        ? "Abgelehnt"
-                        : "Storniert"
-                    )
-                    .join(", ")}
-            </div>
-          </button>
-
-          {statusPickerOpen && (
-            <div
-              style={{
-                position: "absolute",
-                top: "calc(100% + 8px)",
-                left: 0,
-                right: 0,
-                zIndex: 50,
-                background: "rgba(10,14,20,0.98)",
-                border: "1px solid #273243",
-                borderRadius: 16,
-                padding: 12,
-                boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-              }}
-            >
-              <div style={{ display: "flex", gap: 10, justifyContent: "space-between", marginBottom: 10 }}>
-                <button
-                  type="button"
-                  onClick={() => setStatusFilter(["REQUESTED", "APPROVED"])}
-                  style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 800 }}
-                >
-                  Default
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStatusFilter(["REQUESTED", "APPROVED", "REJECTED", "CANCELLED"])}
-                  style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 800 }}
-                >
-                  Alle
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStatusPickerOpen(false)}
-                  style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 800 }}
-                >
-                  Schließen
-                </button>
-              </div>
-
-              {(["REQUESTED", "APPROVED", "REJECTED", "CANCELLED"] as BookingStatus[]).map((s) => {
-                const label =
-                  s === "REQUESTED"
-                    ? "Angefragt"
-                    : s === "APPROVED"
-                    ? "Genehmigt"
-                    : s === "REJECTED"
-                    ? "Abgelehnt"
-                    : "Storniert";
-                const checked = statusFilter.includes(s);
-                return (
-                  <label
-                    key={s}
-                    style={{
-                      display: "flex",
-                      gap: 10,
-                      alignItems: "center",
-                      padding: "8px 10px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.08)",
-                      marginBottom: 8,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) => {
-                        setStatusFilter((prev) => {
-                          const next = new Set(prev);
-                          if (e.target.checked) next.add(s);
-                          else next.delete(s);
-                          return Array.from(next) as BookingStatus[];
-                        });
-                      }}
-                    />
-                    <span style={{ fontWeight: 700 }}>{label}</span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {error && <div style={{ marginTop: 12, color: "crimson", fontWeight: 700 }}>{error}</div>}
+      
+      {/* Zeitraum */}
+{error && <div style={{ marginTop: 12, color: "crimson", fontWeight: 700 }}>{error}</div>}
 
       {/* Kalender */}
-      <div style={{ marginTop: 16, position: "relative" }}>
-        {/* View Switcher (rechts oben) */}
+      <div style={{ marginTop: 16 }}>
+        {/* View Switcher */}
         <div
           style={{
-            position: "absolute",
-            right: 10,
-            top: 10,
-            zIndex: 5,
             display: "flex",
+            justifyContent: "flex-end",
             gap: 8,
+            marginBottom: 12,
+            flexWrap: "wrap",
           }}
         >
           <button
@@ -759,9 +903,73 @@ export default function CalendarPage() {
           >
             Liste
           </button>
+
+<button
+  onClick={async () => {
+    setViewMode("dashboard");
+    await loadListRange();
+  }}
+  style={{
+    padding: "8px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: viewMode === "dashboard" ? "rgba(255,255,255,0.10)" : "transparent",
+    color: "#e6edf3",
+    fontWeight: 800,
+    cursor: "pointer",
+  }}
+>
+  Dashboard
+</button>
         </div>
 
-        {viewMode !== "list" ? (
+        
+
+{viewMode === "dashboard" ? (
+  <div className="card" style={{ padding: 16 }}>
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginBottom: 12 }}>
+      <div>
+        <div style={{ opacity: 0.8, fontSize: 13, marginBottom: 6 }}>Von</div>
+        <input
+          type="date"
+          value={listFrom}
+          onChange={(e) => setListFrom(e.target.value)}
+          style={{
+            padding: "8px 10px",
+            borderRadius: 12,
+            border: "1px solid #273243",
+            background: "transparent",
+            color: "#e6edf3",
+          }}
+        />
+      </div>
+      <div>
+        <div style={{ opacity: 0.8, fontSize: 13, marginBottom: 6 }}>Bis</div>
+        <input
+          type="date"
+          value={listTo}
+          onChange={(e) => setListTo(e.target.value)}
+          style={{
+            padding: "8px 10px",
+            borderRadius: 12,
+            border: "1px solid #273243",
+            background: "transparent",
+            color: "#e6edf3",
+          }}
+        />
+      </div>
+      <button onClick={loadListRange} style={{ padding: "9px 12px", borderRadius: 12, fontWeight: 800 }}>
+        Laden
+      </button>
+      <div style={{ opacity: 0.75, fontSize: 13, marginLeft: 8 }}>
+        Hinweis: Es werden die aktuellen Plätze- und Status-Filter berücksichtigt.
+      </div>
+    </div>
+
+    <PitchDashboardView pitches={pitches} bookings={filteredBookings} />
+    {listDays.length === 0 && <div style={{ opacity: 0.8, marginTop: 10 }}>Bitte Zeitraum wählen.</div>}
+  </div>
+) : viewMode !== "list" ? (
           <FullCalendar
             ref={calendarRef as any}
             plugins={[timeGridPlugin, dayGridPlugin, interactionPlugin]}
@@ -844,7 +1052,7 @@ export default function CalendarPage() {
                   value={listFrom}
                   onChange={(e) => setListFrom(e.target.value)}
                   style={{
-                    padding: "10px 12px",
+                    padding: "8px 10px",
                     borderRadius: 12,
                     border: "1px solid #273243",
                     background: "transparent",
@@ -859,7 +1067,7 @@ export default function CalendarPage() {
                   value={listTo}
                   onChange={(e) => setListTo(e.target.value)}
                   style={{
-                    padding: "10px 12px",
+                    padding: "8px 10px",
                     borderRadius: 12,
                     border: "1px solid #273243",
                     background: "transparent",
@@ -867,7 +1075,7 @@ export default function CalendarPage() {
                   }}
                 />
               </div>
-              <button onClick={loadListRange} style={{ padding: "10px 14px", borderRadius: 12, fontWeight: 800 }}>
+              <button onClick={loadListRange} style={{ padding: "9px 12px", borderRadius: 12, fontWeight: 800 }}>
                 Laden
               </button>
               <div style={{ opacity: 0.75, fontSize: 13, marginLeft: 8 }}>
@@ -888,9 +1096,31 @@ export default function CalendarPage() {
                   return bs < dayEnd && be > dayStart;
                 });
 
+
+// Overlap-Layout pro Platz (damit doppelte Buchungen nebeneinander angezeigt werden)
+const overlapPosById = new Map<string, { colIndex: number; colCount: number }>();
+const minT = new Date(dayStart.getTime() + LIST_START_HOUR * 60 * 60 * 1000);
+const maxT = new Date(dayStart.getTime() + LIST_END_HOUR * 60 * 60 * 1000);
+
+for (const p of visiblePitchesForList) {
+  const boxes = dayBookings
+    .filter((b) => b.pitch_id === p.id)
+    .map((b) => {
+      const bsRaw = new Date(b.start_at);
+      const beRaw = new Date(b.end_at);
+      const start = clamp(bsRaw, minT, maxT);
+      const end = clamp(beRaw, minT, maxT);
+      return { id: b.id, start, end };
+    })
+    .filter((x) => x.end > x.start);
+
+  const layout = computeOverlapLayout(boxes);
+  layout.forEach((pos, id) => overlapPosById.set(id, pos));
+}
+
                 return (
-                  <div key={day.toISOString()} className="card" style={{ padding: 12 }}>
-                    <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>
+                  <div key={day.toISOString()} className="card print-day" style={{ padding: 12 }}>
+                    <div className="day-header" style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>
                       {day.toLocaleDateString("de-DE", {
                         weekday: "long",
                         day: "2-digit",
@@ -899,12 +1129,16 @@ export default function CalendarPage() {
                       })}
                     </div>
 
+                    <div className="print-wrap" style={{ overflowX: "auto", width: "100%" }}>
                     <div
+                      className="print-grid"
                       style={{
                         display: "grid",
-                        gridTemplateColumns: `78px repeat(${visiblePitchesForList.length}, minmax(220px, 1fr))`,
+                        minWidth: 78 + visiblePitchesForList.length * 260,
+                        width: "max-content",
+                        gridTemplateColumns: `78px repeat(${visiblePitchesForList.length}, minmax(260px, 1fr))`,
                         gridTemplateRows: `36px repeat(${listSlots.length}, 28px)`,
-                        gap: 6,
+                        gap: 4,
                       }}
                     >
                       {/* Header */}
@@ -955,9 +1189,11 @@ export default function CalendarPage() {
                             style={{
                               gridColumn: 2 + pi,
                               gridRow: 2 + si,
-                              border: "1px solid rgba(255,255,255,0.06)",
-                              borderRadius: 12,
-                              background: "rgba(255,255,255,0.02)",
+                              // Option 1: freie Slots "unsichtbar" – keine Boxen, nur eine zarte Linie
+                              border: "none",
+                              borderTop: "1px solid rgba(255,255,255,0.06)",
+                              borderRadius: 0,
+                              background: "transparent",
                             }}
                           />
                         ))
@@ -991,9 +1227,22 @@ export default function CalendarPage() {
                         const title = `${pName}`.trim();
                         const timeLabel = `${fmtTime(b.start_at)}–${fmtTime(b.end_at)}`;
 
-                        return (
+
+const pos = overlapPosById.get(b.id) ?? { colIndex: 0, colCount: 1 };
+const gapPx = 6;
+const w =
+  pos.colCount > 1
+    ? `calc((100% - ${(pos.colCount - 1) * gapPx}px) / ${pos.colCount})`
+    : "100%";
+const ml =
+  pos.colCount > 1
+    ? `calc(${pos.colIndex} * (((100% - ${(pos.colCount - 1) * gapPx}px) / ${pos.colCount}) + ${gapPx}px))`
+    : "0px";
+
+return (
                           <div
                             key={b.id}
+                            className="print-event"
                             title={`${timeLabel}\n${tName}\n${title}`}
                             style={{
                               gridColumn: 2 + pIndex,
@@ -1004,6 +1253,8 @@ export default function CalendarPage() {
                               border: `1px solid ${border}`,
                               background: bg,
                               padding: "8px 10px",
+                              width: w,
+                              marginLeft: ml,
                               overflow: "hidden",
                               display: "flex",
                               flexDirection: "column",
@@ -1017,6 +1268,7 @@ export default function CalendarPage() {
                           </div>
                         );
                       })}
+                    </div>
                     </div>
                   </div>
                 );
