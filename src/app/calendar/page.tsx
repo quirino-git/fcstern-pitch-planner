@@ -139,6 +139,8 @@ function hideTip() {
   useEffect(() => {
     if (listFrom || listTo) return;
     const now = new Date();
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dragInsertMode, setDragInsertMode] = useState<"before" | "after">("before");
     const day = (now.getDay() + 6) % 7; // Mon=0
     const monday = new Date(now);
     monday.setHours(0, 0, 0, 0);
@@ -547,6 +549,8 @@ function PitchDashboardView({
   };
 
   const now = new Date();
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dragInsertMode, setDragInsertMode] = useState<"before" | "after">("before");
 
   const onDragStart = (e: React.DragEvent, id: string) => {
     e.dataTransfer.setData("text/plain", id);
@@ -561,20 +565,42 @@ function PitchDashboardView({
     setOrder((prev) => {
       const next = prev.length ? [...prev] : pitches.map((p) => String(p.id));
       const from = next.indexOf(String(draggedId));
-      const to = next.indexOf(String(targetId));
-      if (from === -1 || to === -1) return prev;
+      const targetIndex = next.indexOf(String(targetId));
+      if (from === -1 || targetIndex === -1) return prev;
 
       next.splice(from, 1);
-      next.splice(to, 0, String(draggedId));
+      const newTargetIndex = next.indexOf(String(targetId));
+      const insertIndex = dragInsertMode === "after" ? newTargetIndex + 1 : newTargetIndex;
+      next.splice(insertIndex, 0, String(draggedId));
 
       try {
         window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(next));
       } catch {}
       return next;
     });
+
+    setDragOverId(null);
+    setDragInsertMode("before");
   };
 
-  const onDragOver = (e: React.DragEvent) => e.preventDefault();
+  const onDragOver = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Top/Bottom zones have priority, so vertical moves work on wide cards too.
+    const topZone = rect.height * 0.28;
+    const bottomZone = rect.height * 0.72;
+
+    let mode: "before" | "after";
+    if (y <= topZone) mode = "before";
+    else if (y >= bottomZone) mode = "after";
+    else mode = x >= rect.width / 2 ? "after" : "before";
+
+    setDragOverId(targetId);
+    setDragInsertMode(mode);
+  };
 
   return (
     <div
@@ -593,10 +619,25 @@ function PitchDashboardView({
           <div
             key={p.id}
             className="card"
-            style={{ padding: 12, cursor: "grab" }}
+            style={{
+              padding: 12,
+              cursor: "grab",
+              border:
+                dragOverId === String(p.id) ? "1px dashed rgba(180,220,255,0.65)" : undefined,
+              boxShadow:
+                dragOverId === String(p.id)
+                  ? dragInsertMode === "before"
+                    ? "inset 0 3px 0 rgba(90,200,255,0.9)"
+                    : "inset 0 -3px 0 rgba(90,200,255,0.9)"
+                  : undefined,
+            }}
             draggable
             onDragStart={(e) => onDragStart(e, String(p.id))}
-            onDragOver={onDragOver}
+            onDragEnd={() => {
+              setDragOverId(null);
+              setDragInsertMode("before");
+            }}
+            onDragOver={(e) => onDragOver(e, String(p.id))}
             onDrop={(e) => onDrop(e, String(p.id))}
             title="Zum Umsortieren ziehen"
           >
@@ -707,9 +748,69 @@ function PitchDashboardView({
 
               {items.length > 10 && <div style={{ opacity: 0.7, fontSize: 12 }}>+{items.length - 10} weitere…</div>}
             </div>
+
+            {/* Extra drop zone below each pitch card so you can place a column "under" it */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOverId(String(p.id));
+                setDragInsertMode("after");
+              }}
+              onDrop={(e) => {
+                setDragOverId(String(p.id));
+                setDragInsertMode("after");
+                onDrop(e, String(p.id));
+              }}
+              style={{
+                height: 34,
+                borderRadius: 10,
+                border:
+                  dragOverId === String(p.id) && dragInsertMode === "after"
+                    ? "1px dashed rgba(90,200,255,0.55)"
+                    : "1px dashed transparent",
+                background:
+                  dragOverId === String(p.id) && dragInsertMode === "after"
+                    ? "rgba(90,200,255,0.08)"
+                    : "transparent",
+              }}
+            />
           </div>
         );
       })}
+
+      {/* Global end-zone makes it easy to move a pitch to the very end / next row */}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOverId("__END__");
+          setDragInsertMode("after");
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          const fromId = e.dataTransfer.getData("text/plain");
+          if (!fromId) return;
+          setOrder((prev) => {
+            const base = prev.length ? [...prev] : pitches.map((x) => String(x.id));
+            const fromIdx = base.findIndex((id) => String(id) === String(fromId));
+            if (fromIdx < 0) return prev;
+            const [moved] = base.splice(fromIdx, 1);
+            base.push(String(moved));
+            try {
+              window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(base));
+            } catch {}
+            return base;
+          });
+          setDragOverId(null);
+          setDragInsertMode("before");
+        }}
+        style={{
+          gridColumn: "1 / -1",
+          height: 42,
+          borderRadius: 12,
+          border: dragOverId === "__END__" ? "1px dashed rgba(90,200,255,0.55)" : "1px dashed transparent",
+          background: dragOverId === "__END__" ? "rgba(90,200,255,0.08)" : "transparent",
+        }}
+      />
     </div>
   );
 }
