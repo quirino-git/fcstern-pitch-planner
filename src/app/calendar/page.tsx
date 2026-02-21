@@ -50,6 +50,59 @@ function fmtTime(iso: string) {
   return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 }
 
+
+function bookingLabelLikeDashboard(b: any) {
+  const cleanup = (raw: string) =>
+    String(raw || "")
+      .replace(/\\,/g, ",")
+      .replace(/\[(?:BFV_[^\]]+|BFVTEAM_ID:[^\]]+|BFV_UID:[^\]]+)\]/gi, "")
+      .replace(/\bBFV_UID:[^\s,\]]+/gi, "")
+      .replace(/\bBFVTEAM_ID:[^\s,\]]+/gi, "")
+      .replace(/\\n/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const takeBeforeRealComma = (raw: string) => {
+    const placeholder = "__ESC_COMMA__";
+    const tmp = String(raw || "").replace(/\\,/g, placeholder);
+    return (tmp.split(",")[0] || "").replace(new RegExp(placeholder, "g"), ",");
+  };
+
+  const normalizeLabel = (raw: string) => {
+    let label = cleanup(takeBeforeRealComma(raw));
+    if (!label.includes(" – ")) label = label.replace(/\s-\s/, " – ");
+    return label;
+  };
+
+  // 1) note (BFV-Spieltext) ist meist am besten
+  const note = typeof b?.note === "string" ? b.note.trim() : "";
+  if (note) {
+    const first = note.split(/\r?\n/)[0] || note;
+    const label = normalizeLabel(first);
+    if (label) return label;
+  }
+
+  // 2) tooltipText (falls vorhanden)
+  const tt = typeof (b as any)?.tooltipText === "string" ? String((b as any).tooltipText).trim() : "";
+  if (tt) {
+    const first = tt.split(/\r?\n/)[0] || "";
+    const label = normalizeLabel(first);
+    if (label) return label;
+  }
+
+  // 3) title (falls vorhanden)
+  const title = typeof (b as any)?.title === "string" ? String((b as any).title).trim() : "";
+  if (title) {
+    const label = normalizeLabel(title);
+    if (label) return label;
+  }
+
+  // 4) Fallback: Teamname
+  const tn = typeof b?.teams?.name === "string" ? b.teams.name.trim() : "";
+  return tn || "—";
+}
+
+
 function roundToStep(date: Date, stepMinutes: number) {
   const d = new Date(date);
   const ms = stepMinutes * 60 * 1000;
@@ -293,7 +346,7 @@ function hideTip() {
   // -------------------------
   // LIST VIEW (Variante A: Zeitraster x Plätze)
   // -------------------------
-  const LIST_START_HOUR = 8;
+  const LIST_START_HOUR = 9;
   const LIST_END_HOUR = 22;
   const SLOT_MIN = 30;
 
@@ -613,7 +666,6 @@ function PitchDashboardView({
     >
       {sortedPitches.map((p) => {
         const items = byPitch.get(String(p.id)) ?? [];
-        const next = items.find((x) => norm(x.end_at) > now) ?? null;
 
         return (
           <div
@@ -647,53 +699,6 @@ function PitchDashboardView({
                 {items.length} Buchung{items.length === 1 ? "" : "en"}
               </div>
             </div>
-
-            {next && (
-              <div
-                style={{
-                  marginTop: 10,
-                  position: "relative",
-                  padding: 16,
-                  border: "1px solid rgba(16,185,129,0.25)",
-                  borderRadius: 12,
-                  background: "rgba(16,185,129,0.10)",
-                }}
-              >
-                <span
-                  style={{
-                    position: "absolute",
-                    top: -15,
-                    right: 10,
-                    fontSize: 10,
-                    fontWeight: 800,
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "rgba(16,185,129,0.18)",
-                    border: "1px solid rgba(16,185,129,0.35)",
-                    lineHeight: 1.2,
-                  }}
-                >
-                  Als Nächstes
-                </span>
-                <div
-                  style={{
-                    fontWeight: 600,
-                    fontSize: 14,
-                    lineHeight: 1.2,
-                    minWidth: 0,
-                    overflow: "hidden",
-                    display: "-webkit-box",
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: "horizontal",
-                  }}
-                >
-                  {teamName(next)}
-                </div>
-                <div style={{ opacity: 0.92, marginTop: 4, fontSize: 13, fontWeight: 800 }}>
-                  {timeRange(next)}
-                </div>
-              </div>
-            )}
 
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
               {items.slice(0, 10).map((b) => {
@@ -1086,8 +1091,8 @@ const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "AD
             }}
             locale={deLocale}
             firstDay={1}
-            slotMinTime="08:00:00"
-            slotMaxTime="22:00:00"
+            slotMinTime="09:00:00"
+            slotMaxTime="21:30:00"
             allDaySlot={false}
             slotDuration="00:30:00"
             snapDuration="00:30:00"
@@ -1324,7 +1329,7 @@ for (const p of visiblePitchesForList) {
                           status === "APPROVED" ? "rgba(40, 160, 80, 0.55)" : "rgba(210, 160, 0, 0.45)";
 
                         const pName = b.pitches?.name ?? pitchById.get(b.pitch_id)?.name ?? "";
-                        const tName = b.teams?.name ?? teamById.get(b.team_id)?.name ?? "—";
+                        const tName = bookingLabelLikeDashboard(b);
                         const title = `${pName}`.trim();
                         const timeLabel = `${fmtTime(b.start_at)}–${fmtTime(b.end_at)}`;
 
