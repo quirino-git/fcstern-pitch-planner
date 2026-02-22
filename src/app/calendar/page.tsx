@@ -754,7 +754,7 @@ const gridCols = "repeat(auto-fit, minmax(320px, 1fr))";
                   data-pitch-card="1"
                   data-day-key={day.key}
                   data-pitch-id={String(p.id)}
-                  className="card"
+                  className="card print-pitch-block"
                   draggable
                   onDragStart={(e) => {
                     e.dataTransfer.setData("text/plain", String(p.id));
@@ -801,6 +801,7 @@ const gridCols = "repeat(auto-fit, minmax(320px, 1fr))";
                       {cards.map((b, idx) => (
                         <div
                           key={`${b.id}-${idx}`}
+                          className="print-booking-card"
                           style={{
                             borderRadius: 14,
                             border: "1px solid rgba(0,255,170,0.25)",
@@ -810,6 +811,7 @@ const gridCols = "repeat(auto-fit, minmax(320px, 1fr))";
                           }}
                         >
                           <div
+                            className="print-booking-title"
                             style={{
                               fontWeight: 600,
                               fontSize: 14,
@@ -824,7 +826,7 @@ const gridCols = "repeat(auto-fit, minmax(320px, 1fr))";
                           >
                             {bookingLabelLikeDashboard(b)}
                           </div>
-                          <div style={{ opacity: 0.95, fontSize: 14, fontWeight: 600, letterSpacing: 0.2 }}>
+                          <div className="print-booking-time" style={{ opacity: 0.95, fontSize: 14, fontWeight: 600, letterSpacing: 0.2 }}>
                             {fmtTime(b.start_at)}–{fmtTime(b.end_at)}
                           </div>
                         </div>
@@ -864,13 +866,25 @@ const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "AD
           }
 
           .print-event { font-size: 10px !important; line-height: 1.1 !important; }
+
+          .print-booking-card {
+            background: #fff !important;
+            border: 1px solid #cfd8dc !important;
+          }
+          .print-booking-title,
+          .print-booking-time {
+            color: #111 !important;
+            opacity: 1 !important;
+            text-shadow: none !important;
+          }
           * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 
           .print-day {
+            /* Neuer Tag auf neue Seite, aber Tag darf umbrechen (verhindert große Leerflächen) */
             break-before: page;
-            break-inside: avoid;
+            break-inside: auto;
             page-break-before: always;
-            page-break-inside: avoid;
+            page-break-inside: auto;
           }
           .print-day:first-of-type {
             break-before: auto;
@@ -879,6 +893,25 @@ const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "AD
           .print-day .day-header {
             break-after: avoid;
             page-break-after: avoid;
+          }
+
+          /* Einzelne Karten / Blöcke möglichst nicht zerschneiden */
+          .print-booking-card,
+          .print-event,
+          .print-grid > .card {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+
+          /* Grid selbst darf umbrechen */
+          .print-grid {
+            break-inside: auto;
+            page-break-inside: auto;
+          }
+
+          .print-pitch-block {
+            break-inside: avoid;
+            page-break-inside: avoid;
           }
         }
       `}</style>

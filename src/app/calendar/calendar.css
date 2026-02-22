@@ -27,9 +27,9 @@
   /* ====== WICHTIG: pro Tag eine Seite + nicht splitten ====== */
   .print-day {
     break-before: page;
-    break-inside: avoid;
+    break-inside: auto;            /* Tag darf umbrechen -> weniger Leerflächen */
     page-break-before: always;     /* Fallback */
-    page-break-inside: avoid;      /* Fallback */
+    page-break-inside: auto;       /* Fallback */
   }
 
   /* Erste Tages-Card soll nicht mit Leer-Seite starten */
@@ -48,6 +48,19 @@
   /* Wenn du pro Tag eine "Card" / Container hast, nicht zerreißen */
   .print-day .day-card,
   .print-day .day-grid {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Zusätzliche Print-Regeln gegen unschöne Seitenumbrüche */
+  .print-grid {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .print-pitch-block,
+  .print-booking-card,
+  .print-event {
     break-inside: avoid;
     page-break-inside: avoid;
   }
