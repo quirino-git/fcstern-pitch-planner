@@ -6,7 +6,7 @@ import "./calendar.css";
 // All selectable statuses for the status filter UI
 const ALL_STATUSES = ["REQUESTED", "APPROVED", "REJECTED", "CANCELLED"] as const;
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, Fragment } from "react";
 import Link from "next/link";
 
 import FullCalendar from "@fullcalendar/react";
@@ -62,32 +62,45 @@ function bookingLabelLikeDashboard(b: any) {
       .replace(/\s+/g, " ")
       .trim();
 
-  const takeBeforeRealComma = (raw: string) => {
-    const placeholder = "__ESC_COMMA__";
-    const tmp = String(raw || "").replace(/\\,/g, placeholder);
-    return (tmp.split(",")[0] || "").replace(new RegExp(placeholder, "g"), ",");
-  };
-
   const normalizeLabel = (raw: string) => {
-    let label = cleanup(takeBeforeRealComma(raw));
+    let label = cleanup(raw);
     if (!label.includes(" – ")) label = label.replace(/\s-\s/, " – ");
     return label;
+  };
+
+  const isTimeLine = (s: string) => /^\d{1,2}:\d{2}\s*[–-]\s*\d{1,2}:\d{2}$/.test(s.trim());
+  const isStatusLine = (s: string) => /^(REQUESTED|APPROVED|REJECTED|CANCELLED)$/i.test(s.trim());
+
+  const pickBestTooltipLine = (tt: string) => {
+    const parts = String(tt || "")
+      .split(/\r?\n/)
+      .map((x: string) => normalizeLabel(x))
+      .filter((s: string) => !!s);
+
+    if (!parts.length) return "";
+
+    const filtered = parts.filter((s: string) => !isTimeLine(s) && !isStatusLine(s));
+    const candidates = filtered.length ? filtered : parts;
+
+    // In unserem tooltipText ist oft: [Platzname, Spielbezeichnung, Uhrzeit, Status]
+    // => die längste sinnvolle Zeile ist fast immer die Spielbezeichnung.
+    const best = [...candidates].sort((a: string, b: string) => b.length - a.length)[0];
+    return best || "";
   };
 
   // 1) note (BFV-Spieltext) ist meist am besten
   const note = typeof b?.note === "string" ? b.note.trim() : "";
   if (note) {
-    const first = note.split(/\r?\n/)[0] || note;
-    const label = normalizeLabel(first);
-    if (label) return label;
+    const parts = note.split(/\r?\n/).map((x: string) => normalizeLabel(x)).filter((s: string) => !!s);
+    const best = [...parts].sort((a: string, b: string) => b.length - a.length)[0] || "";
+    if (best) return best;
   }
 
-  // 2) tooltipText (falls vorhanden)
+  // 2) tooltipText (enthält oft Platz + Spiel + Zeit + Status)
   const tt = typeof (b as any)?.tooltipText === "string" ? String((b as any).tooltipText).trim() : "";
   if (tt) {
-    const first = tt.split(/\r?\n/)[0] || "";
-    const label = normalizeLabel(first);
-    if (label) return label;
+    const best = pickBestTooltipLine(tt);
+    if (best) return best;
   }
 
   // 3) title (falls vorhanden)
@@ -192,8 +205,6 @@ function hideTip() {
   useEffect(() => {
     if (listFrom || listTo) return;
     const now = new Date();
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
-  const [dragInsertMode, setDragInsertMode] = useState<"before" | "after">("before");
     const day = (now.getDay() + 6) % 7; // Mon=0
     const monday = new Date(now);
     monday.setHours(0, 0, 0, 0);
@@ -490,332 +501,342 @@ function computeOverlapLayout(boxes: OverlapBox[]): Map<string, OverlapPos> {
 // -------------------------
 // Dashboard (Cards per pitch) + Drag & Drop
 // -------------------------
+
+
+
 function PitchDashboardView({
   pitches,
   bookings,
+  from,
+  to,
+  darkMode,
 }: {
-  pitches: { id: string; name: string }[];
-  bookings: any[];
+  pitches: Pitch[];
+  bookings: Booking[];
+  from: string;
+  to: string;
+  darkMode: boolean;
 }) {
-  const norm = (d: any) => (d instanceof Date ? d : new Date(String(d)));
+  const [orderByDay, setOrderByDay] = useState<Record<string, string[]>>({});
+  const [dropHint, setDropHint] = useState<{ dayKey: string; insertIndex: number } | null>(null);
+  const dayGridRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // Store pitch order locally so you can rearrange tiles
-  const [order, setOrder] = useState<string[]>(() => {
-    try {
-      const raw = typeof window !== "undefined" ? window.localStorage.getItem("fcstern_pitch_order") : null;
-      const arr = raw ? (JSON.parse(raw) as unknown) : null;
-      return Array.isArray(arr) ? arr.map(String) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // Keep order in sync when pitches change
   useEffect(() => {
-    const ids = pitches.map((p) => String(p.id));
-    setOrder((prev) => {
-      const kept = prev.filter((id) => ids.includes(id));
-      const missing = ids.filter((id) => !kept.includes(id));
-      const next = [...kept, ...missing];
-      try {
-        window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(next));
-      } catch {}
-      return next;
-    });
-  }, [pitches]);
+    try {
+      const raw = window.localStorage.getItem("fcstern_pitch_order_by_day");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          const norm: Record<string, string[]> = {};
+          for (const [k, v] of Object.entries(parsed)) {
+            if (Array.isArray(v)) norm[k] = v.map(String);
+          }
+          setOrderByDay(norm);
+          return;
+        }
+      }
+    } catch {}
+    try {
+      const legacy = window.localStorage.getItem("fcstern_pitch_order");
+      if (legacy) {
+        const arr = JSON.parse(legacy);
+        if (Array.isArray(arr)) setOrderByDay({ __legacy__: arr.map(String) });
+      }
+    } catch {}
+  }, []);
 
-  const sortedPitches = useMemo(() => {
+  const saveOrderByDay = (next: Record<string, string[]>) => {
+    setOrderByDay(next);
+    try {
+      window.localStorage.setItem("fcstern_pitch_order_by_day", JSON.stringify(next));
+    } catch {}
+  };
+
+  const dayLabel = (d: Date) =>
+    d.toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  const endOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+  const dayKey = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+  const fromDate = useMemo(() => new Date(`${from}T00:00:00`), [from]);
+  const toDate = useMemo(() => new Date(`${to}T00:00:00`), [to]);
+
+  const visibleDays = useMemo(() => {
+    const days: { key: string; date: Date; label: string }[] = [];
+    const cur = new Date(fromDate);
+    const last = new Date(toDate);
+    while (cur <= last) {
+      const d = new Date(cur);
+      days.push({ key: dayKey(d), date: d, label: dayLabel(d) });
+      cur.setDate(cur.getDate() + 1);
+    }
+    return days;
+  }, [fromDate, toDate]);
+
+  const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const byPitchAndDay = useMemo(() => {
+    const map = new Map<string, Map<string, Booking[]>>();
+    for (const p of pitches) map.set(String(p.id), new Map());
+    for (const b of bookings) {
+      const pid = String(b.pitch_id);
+      if (!map.has(pid)) map.set(pid, new Map());
+      const s = new Date(b.start_at);
+      const e = new Date(b.end_at);
+      const cur = startOfDay(s);
+      const last = startOfDay(e);
+      while (cur <= last) {
+        const k = dayKey(cur);
+        const dayStart = startOfDay(cur);
+        const dayEnd = endOfDay(cur);
+        if (e > dayStart && s < dayEnd) {
+          const dm = map.get(pid)!;
+          const arr = dm.get(k) ?? [];
+          arr.push(b);
+          dm.set(k, arr);
+        }
+        cur.setDate(cur.getDate() + 1);
+      }
+    }
+    for (const [, dm] of map) {
+      for (const [k, arr] of dm) {
+        arr.sort((a, b) => +new Date(a.start_at) - +new Date(b.start_at));
+        dm.set(k, arr);
+      }
+    }
+    return map;
+  }, [bookings, pitches]);
+
+  const getSortedPitchesForDay = (k: string) => {
+    const order = orderByDay[k] ?? (visibleDays.length === 1 ? orderByDay["__legacy__"] : undefined) ?? [];
     if (!order.length) return pitches;
-    const map = new Map(pitches.map((p) => [String(p.id), p]));
-    const out: { id: string; name: string }[] = [];
-    for (const id of order) {
-      const p = map.get(String(id));
-      if (p) out.push(p);
-    }
-    // fallback in case something was missing
-    for (const p of pitches) if (!out.some((x) => String(x.id) === String(p.id))) out.push(p);
-    return out;
-  }, [pitches, order]);
-
-  const byPitch = useMemo(() => {
-    const m = new Map<string, any[]>();
-    for (const b of bookings || []) {
-      const pid = String(b.pitch_id ?? "");
-      if (!pid) continue;
-      if (!m.has(pid)) m.set(pid, []);
-      m.get(pid)!.push(b);
-    }
-    for (const arr of m.values()) {
-      arr.sort((a, b) => norm(a.start_at).getTime() - norm(b.start_at).getTime());
-    }
-    return m;
-  }, [bookings]);
-
-  const teamName = (b: any) => {
-    const cleanup = (s: string) =>
-      s
-        .replace(/\\,/g, ",")
-        .replace(/\[(?:BFV_[^\]]+|BFVTEAM_ID:[^\]]+)\]/gi, "")
-        .replace(/\bBFV_UID:[^\s,\]]+/gi, "")
-        .replace(/\bBFVTEAM_ID:[^\s,\]]+/gi, "")
-        .replace(/\\n/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-
-    const takeBeforeRealComma = (raw: string) => {
-      const placeholder = "__ESC_COMMA__";
-      const tmp = raw.replace(/\\,/g, placeholder);
-      return (tmp.split(",")[0] || "").replace(new RegExp(placeholder, "g"), ",");
-    };
-
-    const normalizeLabel = (raw: string) => {
-      let label = cleanup(takeBeforeRealComma(raw));
-      if (!label.includes(" – ")) label = label.replace(/\s-\s/, " – ");
-      return label;
-    };
-
-    const note = typeof b?.note === "string" ? b.note.trim() : "";
-    if (note) {
-      const label = normalizeLabel(note);
-      if (label) return label;
-    }
-
-    const tt = typeof b?.tooltipText === "string" ? b.tooltipText.trim() : "";
-    if (tt) {
-      const firstLine = tt.split(/\r?\n/)[0] || "";
-      const label = normalizeLabel(firstLine);
-      if (label) return label;
-    }
-
-    const tn = typeof b?.teams?.name === "string" ? b.teams.name.trim() : "";
-    return tn || "—";
-  };
-
-  const timeRange = (b: any) => {
-    const s = norm(b.start_at);
-    const e = norm(b.end_at);
-    return (
-      s.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
-      "–" +
-      e.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    );
-  };
-
-  const now = new Date();
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
-  const [dragInsertMode, setDragInsertMode] = useState<"before" | "after">("before");
-
-  const onDragStart = (e: React.DragEvent, id: string) => {
-    e.dataTransfer.setData("text/plain", id);
-    e.dataTransfer.effectAllowed = "move";
-  };
-
-  const onDrop = (e: React.DragEvent, targetId: string) => {
-    e.preventDefault();
-    const draggedId = e.dataTransfer.getData("text/plain");
-    if (!draggedId || draggedId === targetId) return;
-
-    setOrder((prev) => {
-      const next = prev.length ? [...prev] : pitches.map((p) => String(p.id));
-      const from = next.indexOf(String(draggedId));
-      const targetIndex = next.indexOf(String(targetId));
-      if (from === -1 || targetIndex === -1) return prev;
-
-      next.splice(from, 1);
-      const newTargetIndex = next.indexOf(String(targetId));
-      const insertIndex = dragInsertMode === "after" ? newTargetIndex + 1 : newTargetIndex;
-      next.splice(insertIndex, 0, String(draggedId));
-
-      try {
-        window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(next));
-      } catch {}
-      return next;
+    const pos = new Map(order.map((id, i) => [String(id), i]));
+    return [...pitches].sort((a, b) => {
+      const pa = pos.has(String(a.id)) ? (pos.get(String(a.id)) as number) : Number.MAX_SAFE_INTEGER;
+      const pb = pos.has(String(b.id)) ? (pos.get(String(b.id)) as number) : Number.MAX_SAFE_INTEGER;
+      if (pa !== pb) return pa - pb;
+      return a.name.localeCompare(b.name, "de");
     });
-
-    setDragOverId(null);
-    setDragInsertMode("before");
   };
 
-  const onDragOver = (e: React.DragEvent, targetId: string) => {
-    e.preventDefault();
-    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+  
+const reorderDayToIndex = (dayKeyValue: string, fromId: string, rawInsertIndex: number) => {
+  const nextMap = { ...orderByDay };
+  const base = (nextMap[dayKeyValue]?.length ? [...nextMap[dayKeyValue]] : pitches.map((x) => String(x.id))).map(String);
+  const fromIdx = base.findIndex((id) => id === String(fromId));
+  if (fromIdx < 0) return;
+  const [moved] = base.splice(fromIdx, 1);
 
-    // Top/Bottom zones have priority, so vertical moves work on wide cards too.
-    const topZone = rect.height * 0.28;
-    const bottomZone = rect.height * 0.72;
+  let insertIndex = Math.max(0, Math.min(rawInsertIndex, base.length));
+  if (fromIdx < rawInsertIndex) insertIndex -= 1;
+  insertIndex = Math.max(0, Math.min(insertIndex, base.length));
 
-    let mode: "before" | "after";
-    if (y <= topZone) mode = "before";
-    else if (y >= bottomZone) mode = "after";
-    else mode = x >= rect.width / 2 ? "after" : "before";
+  base.splice(insertIndex, 0, String(moved));
+  nextMap[dayKeyValue] = base;
+  saveOrderByDay(nextMap);
+};
 
-    setDragOverId(targetId);
-    setDragInsertMode(mode);
-  };
+const getGridCardsOrdered = (dayKeyValue: string) => {
+  const gridEl = dayGridRefs.current[dayKeyValue];
+  if (!gridEl) return [] as { id: string; rect: DOMRect }[];
+  const cards = Array.from(gridEl.querySelectorAll('[data-pitch-card="1"]')) as HTMLDivElement[];
+  return cards
+    .map((el) => ({ id: String(el.dataset.pitchId || ""), rect: el.getBoundingClientRect() }))
+    .filter((x) => !!x.id)
+    .sort((a, b) => {
+      const dy = a.rect.top - b.rect.top;
+      if (Math.abs(dy) > 16) return dy;
+      return a.rect.left - b.rect.left;
+    });
+};
+
+const computeInsertIndexFromPointer = (dayKeyValue: string, clientX: number, clientY: number) => {
+  const ordered = getGridCardsOrdered(dayKeyValue);
+  if (!ordered.length) return 0;
+
+  // Build visual rows from actual rendered card positions (responsive-safe)
+  const rows: { top: number; bottom: number; centerY: number; items: typeof ordered }[] = [];
+  for (const item of ordered) {
+    const r = item.rect;
+    const centerY = r.top + r.height / 2;
+    const row = rows.find((rw) => Math.abs(rw.centerY - centerY) < 28);
+    if (!row) {
+      rows.push({ top: r.top, bottom: r.bottom, centerY, items: [item] as any });
+    } else {
+      row.items.push(item as any);
+      row.top = Math.min(row.top, r.top);
+      row.bottom = Math.max(row.bottom, r.bottom);
+      row.centerY = row.items.reduce((acc, it) => acc + (it.rect.top + it.rect.height / 2), 0) / row.items.length;
+    }
+  }
+
+  rows.sort((a, b) => a.top - b.top);
+  rows.forEach((row) => row.items.sort((a, b) => a.rect.left - b.rect.left));
+
+  // Pointer above first / below last row
+  if (clientY < rows[0].top) return 0;
+  if (clientY > rows[rows.length - 1].bottom) return ordered.length;
+
+  // Find target row (closest by Y)
+  let rowIdx = 0;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const d = Math.min(Math.abs(clientY - row.centerY), clientY < row.top ? row.top - clientY : clientY > row.bottom ? clientY - row.bottom : 0);
+    if (d < bestDist) {
+      bestDist = d;
+      rowIdx = i;
+    }
+  }
+
+  const row = rows[rowIdx];
+  // insertion before first if left of first center
+  for (let i = 0; i < row.items.length; i++) {
+    const item = row.items[i];
+    const cx = item.rect.left + item.rect.width / 2;
+    if (clientX < cx) {
+      return ordered.findIndex((x) => x.id === item.id);
+    }
+  }
+  // otherwise after last in row
+  const last = row.items[row.items.length - 1];
+  return ordered.findIndex((x) => x.id === last.id) + 1;
+};
+
+const gridCols = "repeat(auto-fit, minmax(320px, 1fr))";
+
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gap: 12,
-        gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-        alignItems: "start",
-      }}
-    >
-      {sortedPitches.map((p) => {
-        const items = byPitch.get(String(p.id)) ?? [];
+    <div style={{ display: "grid", gap: 12 }}>
+      {visibleDays.map((day) => (
+        <div key={day.key} className="print-day">
+          <div className="day-header" style={{ fontWeight: 600, fontSize: 14, marginBottom: 8, textTransform: "capitalize" }}>
+            {day.label}
+          </div>
 
-        return (
           <div
-            key={p.id}
-            className="card"
-            style={{
-              padding: 12,
-              cursor: "grab",
-              border:
-                dragOverId === String(p.id) ? "1px dashed rgba(180,220,255,0.65)" : undefined,
-              boxShadow:
-                dragOverId === String(p.id)
-                  ? dragInsertMode === "before"
-                    ? "inset 0 3px 0 rgba(90,200,255,0.9)"
-                    : "inset 0 -3px 0 rgba(90,200,255,0.9)"
-                  : undefined,
+            ref={(el) => { dayGridRefs.current[day.key] = el; }}
+            className="print-grid"
+            style={{ display: "grid", gridTemplateColumns: gridCols, gap: 10, alignItems: "start" }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              const dragDay = e.dataTransfer.getData("text/day-key");
+              const fromId = e.dataTransfer.getData("text/plain");
+              if (!fromId || (dragDay && dragDay !== day.key)) return;
+              const insertIndex = computeInsertIndexFromPointer(day.key, e.clientX, e.clientY);
+              setDropHint({ dayKey: day.key, insertIndex });
             }}
-            draggable
-            onDragStart={(e) => onDragStart(e, String(p.id))}
-            onDragEnd={() => {
-              setDragOverId(null);
-              setDragInsertMode("before");
+            onDrop={(e) => {
+              e.preventDefault();
+              const fromId = e.dataTransfer.getData("text/plain");
+              const fromDay = e.dataTransfer.getData("text/day-key");
+              if (!fromId || fromDay !== day.key) return;
+              const insertIndex = computeInsertIndexFromPointer(day.key, e.clientX, e.clientY);
+              reorderDayToIndex(day.key, fromId, insertIndex);
+              setDropHint(null);
             }}
-            onDragOver={(e) => onDragOver(e, String(p.id))}
-            onDrop={(e) => onDrop(e, String(p.id))}
-            title="Zum Umsortieren ziehen"
+            onDragLeave={(e) => {
+              const next = e.relatedTarget as Node | null;
+              if (!next || !(e.currentTarget as HTMLDivElement).contains(next)) {
+                setDropHint((prev) => (prev?.dayKey === day.key ? null : prev));
+              }
+            }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-              <div style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</div>
-              <div style={{ opacity: 0.35, fontSize: 10 }}>
-                {items.length} Buchung{items.length === 1 ? "" : "en"}
-              </div>
-            </div>
+            {(() => { const sortedPitches = getSortedPitchesForDay(day.key); return sortedPitches.map((p, visualIdx) => {
+              const cards = byPitchAndDay.get(String(p.id))?.get(day.key) ?? [];
+              const showBeforeHint = dropHint?.dayKey === day.key && dropHint?.insertIndex === visualIdx;
+              const showAfterHint = dropHint?.dayKey === day.key && dropHint?.insertIndex === sortedPitches.length && visualIdx === sortedPitches.length - 1;
 
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
-              {items.slice(0, 10).map((b) => {
-                const start = norm(b.start_at);
-                const end = norm(b.end_at);
-                const isNow = start <= now && end > now;
+              return (
+                <div
+                  key={`${day.key}-${p.id}`}
+                  data-pitch-card="1"
+                  data-day-key={day.key}
+                  data-pitch-id={String(p.id)}
+                  className="card"
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData("text/plain", String(p.id));
+                    e.dataTransfer.setData("text/day-key", day.key);
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDragEnd={() => setDropHint(null)}
+                  style={{
+                    position: "relative",
+                    padding: 12,
+                    cursor: "grab",
+                    minHeight: 120,
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    boxShadow: showBeforeHint || showAfterHint ? "0 0 0 2px rgba(90,200,255,0.14) inset" : undefined,
+                  }}
+                >
+                  {(showBeforeHint || showAfterHint) && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 10,
+                        right: 10,
+                        height: 0,
+                        borderTop: "3px solid rgba(90,200,255,0.9)",
+                        top: showBeforeHint ? 8 : undefined,
+                        bottom: showAfterHint ? 8 : undefined,
+                        borderRadius: 999,
+                        pointerEvents: "none",
+                      }}
+                    />
+                  )}
 
-                return (
-                  <div
-                    key={b.id}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      padding: 16,
-                      border: "1px solid rgba(16,185,129,0.25)",
-                      borderRadius: 12,
-                      background: "rgba(16,185,129,0.10)",
-                    }}
-                  >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                        <div style={{ fontWeight: 600, fontSize: 14, lineHeight: 1.2, minWidth: 0, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "horizontal" }}>
-                          {teamName(b)}
-                        </div>
-                        {isNow && (
-                          <span
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 8px",
-                              borderRadius: 999,
-                              background: "rgba(59,130,246,0.18)",
-                              border: "1px solid rgba(59,130,246,0.35)",
-                            }}
-                          >
-                            läuft
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ opacity: 0.92, fontSize: 13, fontWeight: 800, marginTop: 4 }}>
-                        {timeRange(b)}
-                        
-                      </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
+                    <div style={{ fontWeight: 650, fontSize: 14 }}>{p.name}</div>
+                    <div style={{ opacity: 0.7, fontSize: 13 }}>
+                      {cards.length} Buchung{cards.length === 1 ? "" : "en"}
                     </div>
                   </div>
-                );
-              })}
 
-              {items.length === 0 && (
-                <div style={{ opacity: 0.65, fontSize: 13, padding: "10px 0" }}>Keine Buchungen im Zeitraum.</div>
-              )}
-
-              {items.length > 10 && <div style={{ opacity: 0.7, fontSize: 12 }}>+{items.length - 10} weitere…</div>}
-            </div>
-
-            {/* Extra drop zone below each pitch card so you can place a column "under" it */}
-            <div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOverId(String(p.id));
-                setDragInsertMode("after");
-              }}
-              onDrop={(e) => {
-                setDragOverId(String(p.id));
-                setDragInsertMode("after");
-                onDrop(e, String(p.id));
-              }}
-              style={{
-                height: 34,
-                borderRadius: 10,
-                border:
-                  dragOverId === String(p.id) && dragInsertMode === "after"
-                    ? "1px dashed rgba(90,200,255,0.55)"
-                    : "1px dashed transparent",
-                background:
-                  dragOverId === String(p.id) && dragInsertMode === "after"
-                    ? "rgba(90,200,255,0.08)"
-                    : "transparent",
-              }}
-            />
+                  {cards.length === 0 ? (
+                    <div style={{ opacity: 0.7 }}>Keine Buchungen im Zeitraum.</div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {cards.map((b, idx) => (
+                        <div
+                          key={`${b.id}-${idx}`}
+                          style={{
+                            borderRadius: 14,
+                            border: "1px solid rgba(0,255,170,0.25)",
+                            background: "linear-gradient(180deg, rgba(0,255,170,0.10), rgba(0,255,170,0.06))",
+                            padding: "10px 12px",
+                            minHeight: 76, // grows automatically for long titles
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontWeight: 600,
+                              fontSize: 14,
+                              lineHeight: 1.25,
+                              marginBottom: 4,
+                              color: darkMode ? "rgba(255,255,255,0.95)" : "#0b1220",
+                              whiteSpace: "normal",
+                              overflow: "visible",
+                              wordBreak: "break-word",
+                            }}
+                            title={bookingLabelLikeDashboard(b)}
+                          >
+                            {bookingLabelLikeDashboard(b)}
+                          </div>
+                          <div style={{ opacity: 0.95, fontSize: 14, fontWeight: 600, letterSpacing: 0.2 }}>
+                            {fmtTime(b.start_at)}–{fmtTime(b.end_at)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            }); })()}
           </div>
-        );
-      })}
-
-      {/* Global end-zone makes it easy to move a pitch to the very end / next row */}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOverId("__END__");
-          setDragInsertMode("after");
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          const fromId = e.dataTransfer.getData("text/plain");
-          if (!fromId) return;
-          setOrder((prev) => {
-            const base = prev.length ? [...prev] : pitches.map((x) => String(x.id));
-            const fromIdx = base.findIndex((id) => String(id) === String(fromId));
-            if (fromIdx < 0) return prev;
-            const [moved] = base.splice(fromIdx, 1);
-            base.push(String(moved));
-            try {
-              window.localStorage.setItem("fcstern_pitch_order", JSON.stringify(base));
-            } catch {}
-            return base;
-          });
-          setDragOverId(null);
-          setDragInsertMode("before");
-        }}
-        style={{
-          gridColumn: "1 / -1",
-          height: 42,
-          borderRadius: 12,
-          border: dragOverId === "__END__" ? "1px dashed rgba(90,200,255,0.55)" : "1px dashed transparent",
-          background: dragOverId === "__END__" ? "rgba(90,200,255,0.08)" : "transparent",
-        }}
-      />
+        </div>
+      ))}
     </div>
   );
 }
@@ -1072,7 +1093,7 @@ const isAdmin = useMemo(() => (profile?.role || "TRAINER").toUpperCase() === "AD
       </div>
     </div>
 
-    <PitchDashboardView pitches={pitches} bookings={filteredBookings} />
+    <PitchDashboardView pitches={pitches} bookings={filteredBookings} from={listFrom} to={listTo} darkMode={true} />
     {listDays.length === 0 && <div style={{ opacity: 0.8, marginTop: 10 }}>Bitte Zeitraum wählen.</div>}
   </div>
 ) : viewMode !== "list" ? (
@@ -1225,7 +1246,7 @@ for (const p of visiblePitchesForList) {
 }
 
                 return (
-                  <div key={day.toISOString()} className="card print-day" style={{ padding: 12 }}>
+                  <div key={day.toISOString()} className="card print-day" style={{ padding: 16 }}>
                     <div className="day-header" style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>
                       {day.toLocaleDateString("de-DE", {
                         weekday: "long",
@@ -1275,7 +1296,7 @@ for (const p of visiblePitchesForList) {
                             border: "1px solid rgba(255,255,255,0.08)",
                             borderRadius: 12,
                             padding: "6px 8px",
-                            fontSize: 12,
+                            fontSize: 14,
                             opacity: 0.85,
                             background: "rgba(255,255,255,0.03)",
                             display: "flex",
@@ -1398,7 +1419,7 @@ return (
               background: "rgba(10, 20, 30, 0.95)",
               border: "1px solid rgba(255,255,255,0.12)",
               borderRadius: 12,
-              padding: 10,
+              padding: 16,
               fontSize: 13,
               lineHeight: 1.25,
               whiteSpace: "pre-wrap",
